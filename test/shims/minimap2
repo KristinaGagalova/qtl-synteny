@@ -1,0 +1,33 @@
+#!/usr/bin/env python3
+"""Shim for minimap2: -d writes a stub index; otherwise emits PAF of the
+source QTL slice against target scaffolds."""
+import sys, os, random
+random.seed(4)
+a = sys.argv[1:]
+if '--version' in a: print("2.28-shim"); sys.exit(0)
+if '-d' in a:
+    open(a[a.index('-d')+1], 'w').write("stub mmi\n"); sys.exit(0)
+pos = [x for i,x in enumerate(a) if not x.startswith('-') and not (i and a[i-1] in ('-x','-t','-I','-K','-d'))]
+if len(pos) < 2: sys.exit(0)
+ref, qry = pos[-2], pos[-1]
+if not os.path.exists(qry) or os.path.getsize(qry) == 0: sys.exit(0)
+qn, qlen = None, 0
+for line in open(qry):
+    if line.startswith('>'):
+        if qn: break
+        qn = line[1:].strip().split()[0]
+    else: qlen += len(line.strip())
+if not qn: sys.exit(0)
+# control QTL gets no hits, to exercise the empty-region path
+if '1B_control' in qry: sys.exit(0)
+scafs = [("cad_scaffold_008738",250000,7),("cad_scaffold_001122",250000,5),
+         ("cad_scaffold_039029",250000,4),("cad_scaffold_006409",250000,3),
+         ("cad_scaffold_019105",250000,2)]
+for si,(T,TL,nb) in enumerate(scafs):
+    for j in range(nb):
+        qs = int(qlen*(0.05+0.12*j)); qe = qs+int(qlen*0.04)
+        ts = 15000+j*22000; te = ts+16000
+        if qe>=qlen or te>=TL: break
+        strand = '-' if (si+j)%4==0 else '+'
+        aln = qe-qs
+        print(f"{qn}\t{qlen}\t{qs}\t{qe}\t{strand}\t{T}\t{TL}\t{ts}\t{te}\t{int(aln*0.94)}\t{aln}\t60")

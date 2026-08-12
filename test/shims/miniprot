@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+"""Shim for miniprot: places source proteins onto target scaffolds."""
+import sys, os, random
+random.seed(9)
+a = sys.argv[1:]
+if '--version' in a: print("0.13-shim"); sys.exit(0)
+if '-d' in a:
+    open(a[a.index('-d')+1], 'w').write("stub index\n"); sys.exit(0)
+pos = [x for i,x in enumerate(a) if not x.startswith('-') and not (i and a[i-1] in ('-t','-d','--outn'))]
+if len(pos) < 2: sys.exit(0)
+idx, pep = pos[-2], pos[-1]
+names = [l[1:].strip().split()[0] for l in open(pep) if l.startswith('>')]
+scafs = ["cad_scaffold_008738","cad_scaffold_001122","cad_scaffold_039029",
+         "cad_scaffold_006409","cad_scaffold_019105","cad_scaffold_091312"]
+print("##gff-version 3")
+for i, n in enumerate(names):
+    sc = scafs[i % len(scafs)]
+    s = 20000 + (i // len(scafs)) * 14000
+    print(f"{sc}\tminiprot\tmRNA\t{s+1}\t{s+7000}\t500\t+\t.\t"
+          f"ID=MP{i};Rank=1;Identity={random.uniform(0.7,0.98):.2f};Target={n} 1 200")

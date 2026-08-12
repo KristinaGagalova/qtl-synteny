@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""Shim for `mmseqs easy-rbh` / `easy-search`: a crude identity scorer, so the
+integration test exercises the RBH logic without installing MMseqs2."""
+import sys
+a = sys.argv[1:]
+if a and a[0] == 'version':
+    print("15.6f452-shim"); sys.exit(0)
+if not a or a[0] not in ('easy-rbh', 'easy-search'):
+    sys.exit(0)
+mode = a[0]
+rest = a[1:]
+# skip flag values too, so '-s 5.7' does not look like a positional
+pos, skip = [], False
+for i, x in enumerate(rest):
+    if skip:
+        skip = False
+        continue
+    if x.startswith('-'):
+        if i + 1 < len(rest) and not rest[i + 1].startswith('-'):
+            skip = True
+        continue
+    pos.append(x)
+# <query> <target> <out> <tmp>
+qf, tf, out = pos[0], pos[1], pos[2]
+
+
+def read_fa(p):
+    d, name = {}, None
+    for line in open(p):
+        if line.startswith('>'):
+            name = line[1:].strip().split()[0]; d[name] = []
+        elif name:
+            d[name].append(line.strip())
+    return {k: ''.join(v) for k, v in d.items()}
+
+
+def ident(x, y):
+    n = min(len(x), len(y))
+    return 100.0 * sum(1 for i in range(n) if x[i] == y[i]) / n if n else 0.0
+
+
+q, t = read_fa(qf), read_fa(tf)
+fwd = {}
+for qn, qs in q.items():
+    scored = sorted(((ident(qs, ts), tn) for tn, ts in t.items()), reverse=True)
+    scored = [(p, n) for p, n in scored if p >= 25]
+    if scored:
+        fwd[qn] = scored
+
+rows = []
+if mode == 'easy-search':
+    for qn, scored in fwd.items():
+        for pid, tn in scored[:10]:
+            rows.append((qn, tn, pid))
+else:
+    # reciprocal best hits: best(q)->t and best(t)->q
+    rev = {}
+    for tn, ts in t.items():
+        scored = sorted(((ident(ts, qs), qn) for qn, qs in q.items()), reverse=True)
+        if scored and scored[0][0] >= 25:
+            rev[tn] = scored[0][1]
+    for qn, scored in fwd.items():
+        pid, tn = scored[0]
+        if rev.get(tn) == qn:
+            rows.append((qn, tn, pid))
+
+with open(out, 'w') as fo:
+    for qn, tn, pid in rows:
+        fo.write(f"{qn}\t{tn}\t{pid:.1f}\t200\t10\t0\t1\t200\t1\t200\t1e-40\t{pid*6:.0f}\n")
