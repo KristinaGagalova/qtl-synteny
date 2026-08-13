@@ -63,9 +63,10 @@ with open(f"{OUT}/target.fa", "w") as f:
 with open(f"{OUT}/source.gff3", "w") as g, open(f"{OUT}/source.pep.fa", "w") as p:
     g.write("##gff-version 3\n")
     for (gid, s, e, strand) in src_genes:
-        g.write(f"1B\t.\tgene\t{s+1}\t{e}\t.\t{strand}\t.\tID={gid}\n")
-        g.write(f"1B\t.\tmRNA\t{s+1}\t{e}\t.\t{strand}\t.\tID={gid}.t1;Parent={gid}\n")
-        g.write(f"1B\t.\tCDS\t{s+1}\t{e}\t.\t{strand}\t0\tID={gid}.cds;Parent={gid}.t1\n")
+        # Ensembl/EI style: type-prefixed IDs, as in the real Cadenza GFF
+        g.write(f"1B\t.\tgene\t{s+1}\t{e}\t.\t{strand}\t.\tID=gene:{gid};gene_id={gid}\n")
+        g.write(f"1B\t.\tmRNA\t{s+1}\t{e}\t.\t{strand}\t.\tID=transcript:{gid}.t1;Parent=gene:{gid}\n")
+        g.write(f"1B\t.\tCDS\t{s+1}\t{e}\t.\t{strand}\t0\tID=CDS:{gid}.t1;Parent=transcript:{gid}.t1\n")
         p.write(f">{gid}.t1\nM{''.join(random.choice(AA) for _ in range(199))}\n")
 
 # target proteins: orthologues share most of the source sequence
@@ -77,9 +78,9 @@ rev = {v: k for k, v in ortho.items()}
 with open(f"{OUT}/target.gff3", "w") as g, open(f"{OUT}/target.pep.fa", "w") as p:
     g.write("##gff-version 3\n")
     for (gid, sc, s, e, strand) in tgt_genes:
-        g.write(f"{sc}\t.\tgene\t{s+1}\t{e}\t.\t{strand}\t.\tID={gid}\n")
-        g.write(f"{sc}\t.\tmRNA\t{s+1}\t{e}\t.\t{strand}\t.\tID={gid}.t1;Parent={gid}\n")
-        g.write(f"{sc}\t.\tCDS\t{s+1}\t{e}\t.\t{strand}\t0\tID={gid}.cds;Parent={gid}.t1\n")
+        g.write(f"{sc}\t.\tgene\t{s+1}\t{e}\t.\t{strand}\t.\tID=gene:{gid};gene_id={gid}\n")
+        g.write(f"{sc}\t.\tmRNA\t{s+1}\t{e}\t.\t{strand}\t.\tID=transcript:{gid}.t1;Parent=gene:{gid}\n")
+        g.write(f"{sc}\t.\tCDS\t{s+1}\t{e}\t.\t{strand}\t0\tID=CDS:{gid}.t1;Parent=transcript:{gid}.t1\n")
         src_of = rev.get(gid)
         if src_of and src_of in src_pep:
             base = list(src_pep[src_of])
@@ -96,7 +97,7 @@ with open(f"{OUT}/qtl.bed", "w") as f:
 
 def expr(path, genes, samples):
     with open(path, "w") as f:
-        f.write("gene_id\t" + "\t".join(samples) + "\n")
+        f.write("Genes\t" + "\t".join(samples) + "\n")
         for g in genes:
             f.write(g + "\t" + "\t".join(f"{max(0, random.gauss(25, 18)):.2f}"
                                         for _ in samples) + "\n")

@@ -32,13 +32,48 @@ Outputs
 import argparse
 import re
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 ATTR = re.compile(r"([A-Za-z_]+)=([^;]+)")
 
+# Ensembl/EI GFF3 prefixes IDs with the feature type. The gene table has
+# these stripped, but protein FASTA headers (and therefore miniprot Target=
+# and the MMseqs m8 columns) may or may not - it depends entirely on how the
+# proteome file was produced. Rather than assume, index every gene under all
+# plausible spellings so the join works either way.
+TYPE_PREFIX = re.compile(
+    r"^(?:gene|transcript|mRNA|CDS|protein|exon|rna|ncRNA):", re.IGNORECASE)
+
+
+TX_SUFFIX = re.compile(r"\.\d+$")
+
+
+def norm_id(x):
+    """Canonical form of an identifier, so both sides of a join collapse to
+    the same string regardless of how the file spells it:
+
+        'transcript:TraesCAD_..._01G000100.1' -> 'TraesCAD_..._01G000100'
+        'TraesCAD_..._01G000100.1'            -> 'TraesCAD_..._01G000100'
+        'TraesCAD_..._01G000100'              -> 'TraesCAD_..._01G000100'
+
+    Normalising BOTH sides is what makes this work; expanding one side into
+    variants does not, because a bare id can never generate a prefixed one.
+    """
+    if not x:
+        return x
+    x = TYPE_PREFIX.sub("", x, count=1)
+    return TX_SUFFIX.sub("", x)
+
 
 def read_genes(path):
-    """-> (by_id, by_seq) where by_id maps gene AND transcript id."""
+    """-> (by_id, by_seq).
+
+    by_id is deliberately permissive: every gene is indexed under its gene
+    id, its transcript id, and the prefix/suffix variants of both, because
+    the proteome file that miniprot and MMseqs saw may spell identifiers
+    differently from the GFF (an Ensembl 'transcript:' prefix, a trailing
+    '.1'). Exact-match-only joins here silently produced zero links.
+    """
     by_id, by_seq = {}, defaultdict(list)
     with open(path) as fh:
         fh.readline()
@@ -48,9 +83,9 @@ def read_genes(path):
             f = line.rstrip("\n").split("\t")
             seqid, s, e, gid, tid, strand = f[0], int(f[1]), int(f[2]), f[3], f[4], f[5]
             rec = (seqid, s, e, strand, gid)
-            by_id[gid] = rec
-            if tid and tid != gid:
-                by_id[tid] = rec
+            for key in {gid, tid, norm_id(gid), norm_id(tid)}:
+                if key:
+                    by_id.setdefault(key, rec)
             by_seq[seqid].append((s, e, gid, strand, tid))
     for k in by_seq:
         by_seq[k].sort()
@@ -68,12 +103,24 @@ def read_regions(path, qtl_id):
             f = line.rstrip("\n").split("\t")
             if f[i["qtl_id"]] != qtl_id:
                 continue
+            def g(col, default="0"):
+                return f[i[col]] if col in i else default
             regs.append(dict(
                 rank=int(f[i["rank"]]), tgt_seqid=f[i["tgt_seqid"]],
                 tgt_start=int(f[i["tgt_start"]]), tgt_end=int(f[i["tgt_end"]]),
                 aligned_bp=int(f[i["aligned_bp"]]),
                 n_aln_blocks=int(f[i["n_aln_blocks"]]),
                 pct_id=float(f[i["pct_id"]]), strand=f[i["strand"]],
+                src_slice_len=int(g("src_slice_len")),
+                src_cov_bp=int(g("src_cov_bp")),
+                src_cov_pct=float(g("src_cov_pct")),
+                marginal_cov_bp=int(g("marginal_cov_bp")),
+                marginal_cov_pct=float(g("marginal_cov_pct")),
+                cum_src_cov_bp=int(g("cum_src_cov_bp")),
+                cum_src_cov_pct=float(g("cum_src_cov_pct")),
+                tgt_cov_bp=int(g("tgt_cov_bp")),
+                union_src_cov_bp=int(g("union_src_cov_bp")),
+                union_src_cov_pct=float(g("union_src_cov_pct")),
                 raw=f, hdr=hdr))
     regs.sort(key=lambda r: r["rank"])
     return regs
@@ -149,6 +196,16 @@ def main():
     ap.add_argument("--out-genes", required=True)
     ap.add_argument("--out-regions", required=True)
     ap.add_argument("--miniprot-min-ident", type=float, default=0.5)
+    ap.add_argument("--homoeolog-min-frac", type=float, default=0.6,
+                    help="fraction of a scaffold's RBH partners that must sit "
+                         "on the QTL's own chromosome to call it orthologous")
+    ap.add_argument("--homoeolog-evidence", choices=["both", "rbh", "miniprot"],
+                    default="both",
+                    help="which evidence decides the homoeolog call. "
+                         "'miniprot' needs no target annotation at all.")
+    ap.add_argument("--drop-homoeologs", action="store_true",
+                    help="omit regions called HOMOEOLOG_LIKELY entirely "
+                         "(default: keep and flag them)")
     args = ap.parse_args()
 
     src_by_id, src_by_seq = read_genes(args.source_genes)
@@ -161,7 +218,9 @@ def main():
                  if s < args.qtl_end and e > args.qtl_start]
     src_ids = {gid for (_s, _e, gid, _st, _t) in src_genes}
     src_tids = {tid for (_s, _e, _g, _st, tid) in src_genes if tid}
-    qtl_prot_ids = src_ids | src_tids
+    # membership is tested on the normalised form, so the proteome may spell
+    # ids however it likes
+    qtl_prot_ids = {norm_id(x) for x in (src_ids | src_tids)}
 
     # ---- genes inside the candidate regions on the target side
     tgt_genes = []
@@ -176,7 +235,11 @@ def main():
     per_region = defaultdict(lambda: {"miniprot": 0, "rbh": 0})
 
     # ---- STEP 3: miniprot placements of the QTL's source proteins
-    mp = parse_miniprot(args.miniprot, keep_ids=qtl_prot_ids)
+    mp_all = parse_miniprot(args.miniprot)
+    mp_all_unfiltered = mp_all
+    mp_seen = len(mp_all)
+    mp_example = mp_all[0]["protein"] if mp_all else None
+    mp = [h for h in mp_all if norm_id(h["protein"]) in qtl_prot_ids]
     n_mp_total = len(mp)
     for h in mp:
         if h["ident"] < args.miniprot_min_ident:
@@ -184,7 +247,7 @@ def main():
         r = in_regions(regs, h["seqid"], h["start"], h["end"])
         if r is None:
             continue
-        srec = src_by_id.get(h["protein"])
+        srec = src_by_id.get(h["protein"]) or src_by_id.get(norm_id(h["protein"]))
         if srec is None:
             continue
         sseq, ss, se, sstrand, sgid = srec
@@ -202,15 +265,136 @@ def main():
     # ---- STEP 4: reciprocal best hits between the two annotations
     rbh = read_m8(args.rbh)
     n_rbh_total = sum(len(v) for v in rbh.values())
+    rbh_example = next(iter(rbh), None)
+    rbh_resolved = sum(1 for q in rbh
+                       if src_by_id.get(q) or src_by_id.get(norm_id(q)))
+
+    # ---- homoeolog discrimination -------------------------------------
+    # Bread wheat is hexaploid: every locus has A, B and D copies at ~92-96%
+    # identity, while two cultivars of the SAME subgenome are ~99%+. A
+    # homoeologous scaffold therefore aligns well and can outrank the true
+    # orthologue on coverage alone.
+    #
+    # Signal used: take EVERY gene on a candidate scaffold, look up its
+    # reciprocal best hit anywhere in the source genome, and see which source
+    # chromosome those partners sit on. The orthologous scaffold's genes match
+    # the QTL's own chromosome; a homoeolog's genes match a different member
+    # of the same homoeologous group.
+    # --- evidence 1: reciprocal best hits (needs the target annotation)
+    tgt_gene_src_chrom = {}
     for q, lst in rbh.items():
-        srec = src_by_id.get(q)
+        srec = src_by_id.get(q) or src_by_id.get(norm_id(q))
+        if srec is None:
+            continue
+        s_seq = srec[0]
+        for (t, _pid, _bits) in lst:
+            trec = tgt_by_id.get(t) or tgt_by_id.get(norm_id(t))
+            if trec is None:
+                continue
+            tgt_gene_src_chrom.setdefault(trec[4], s_seq)
+
+    # --- evidence 2: miniprot placements (needs NO target annotation, so it
+    # still works on scaffolds that are unannotated or badly annotated)
+    #
+    # Only a protein's BEST placement (Rank=1) is counted. Every member of a
+    # homoeologous triad will align acceptably to all three copies, so
+    # counting every hit would dilute the signal to noise; the best placement
+    # is the one that actually discriminates.
+    mp_by_seq = defaultdict(list)
+    for h in mp_all_unfiltered:
+        if h["rank"] != 1:
+            continue
+        srec = src_by_id.get(h["protein"]) or src_by_id.get(norm_id(h["protein"]))
+        if srec is None:
+            continue
+        mp_by_seq[h["seqid"]].append((h["start"], h["end"], srec[0]))
+
+    def chrom_tally(seqid, region):
+        """(rbh Counter, miniprot Counter) of source chromosomes for one region."""
+        c_rbh = Counter()
+        for (sq, _s, _e, gid, _st, _tid, _rk) in tgt_genes:
+            if sq != seqid:
+                continue
+            c = tgt_gene_src_chrom.get(gid)
+            if c:
+                c_rbh[c] += 1
+        c_mp = Counter()
+        for (hs, he, schrom) in mp_by_seq.get(seqid, []):
+            if hs < region["tgt_end"] and he > region["tgt_start"]:
+                c_mp[schrom] += 1
+        return c_rbh, c_mp
+
+    def homoeolog_call(region):
+        seqid = region["tgt_seqid"]
+        c_rbh, c_mp = chrom_tally(seqid, region)
+        use = {"both": c_rbh + c_mp, "rbh": c_rbh, "miniprot": c_mp}[args.homoeolog_evidence]
+        n_rbh, n_mp = sum(c_rbh.values()), sum(c_mp.values())
+        if not use:
+            return ("NA", 0, n_rbh, n_mp, 0.0, "UNKNOWN")
+        top, n_top = use.most_common(1)[0]
+        total = sum(use.values())
+        frac = use.get(args.qtl_chrom, 0) / total
+        if frac >= args.homoeolog_min_frac:
+            call = "ORTHOLOG_LIKELY"
+        elif top != args.qtl_chrom and n_top / total >= args.homoeolog_min_frac:
+            call = f"HOMOEOLOG_LIKELY({top})"
+        else:
+            call = "UNCLEAR"
+        # flag when the two independent lines of evidence disagree
+        if n_rbh and n_mp:
+            t_rbh = c_rbh.most_common(1)[0][0]
+            t_mp = c_mp.most_common(1)[0][0]
+            if t_rbh != t_mp:
+                call += ";EVIDENCE_CONFLICT"
+        return (top, total, n_rbh, n_mp, frac, call)
+
+    links = []
+    per_region = defaultdict(lambda: {"miniprot": 0, "rbh": 0})
+
+    # ---- STEP 3: miniprot placements of the QTL's source proteins
+    mp_all = parse_miniprot(args.miniprot)
+    mp_all_unfiltered = mp_all
+    mp_seen = len(mp_all)
+    mp_example = mp_all[0]["protein"] if mp_all else None
+    mp = [h for h in mp_all if norm_id(h["protein"]) in qtl_prot_ids]
+    n_mp_total = len(mp)
+    for h in mp:
+        if h["ident"] < args.miniprot_min_ident:
+            continue
+        r = in_regions(regs, h["seqid"], h["start"], h["end"])
+        if r is None:
+            continue
+        srec = src_by_id.get(h["protein"]) or src_by_id.get(norm_id(h["protein"]))
+        if srec is None:
+            continue
+        sseq, ss, se, sstrand, sgid = srec
+        # is there an annotated target gene at this placement?
+        overlapping = [g for g in tgt_by_seq.get(h["seqid"], [])
+                       if g[0] < h["end"] and g[1] > h["start"]]
+        tgene = overlapping[0][2] if overlapping else ""
+        links.append(dict(track="miniprot", src_gene=sgid, src_start=ss, src_end=se,
+                          src_strand=sstrand, tgt_gene=tgene, tgt_seqid=h["seqid"],
+                          tgt_start=h["start"], tgt_end=h["end"],
+                          tgt_strand=h["strand"], pident=100.0 * h["ident"],
+                          bits=0, rank=r["rank"]))
+        per_region[r["tgt_seqid"]]["miniprot"] += 1
+
+    # ---- STEP 4: reciprocal best hits between the two annotations
+    rbh = read_m8(args.rbh)
+    n_rbh_total = sum(len(v) for v in rbh.values())
+    rbh_example = next(iter(rbh), None)
+    rbh_resolved = sum(1 for q in rbh
+                       if src_by_id.get(q) or src_by_id.get(norm_id(q)))
+
+    for q, lst in rbh.items():
+        srec = src_by_id.get(q) or src_by_id.get(norm_id(q))
         if srec is None:
             continue
         sseq, ss, se, sstrand, sgid = srec
         if sgid not in src_ids:
             continue          # only genes inside this QTL
         for (t, pid, bits) in lst:
-            trec = tgt_by_id.get(t)
+            trec = tgt_by_id.get(t) or tgt_by_id.get(norm_id(t))
             if trec is None:
                 continue
             tseq, ts, te, tstrand, tgid = trec
@@ -244,24 +428,63 @@ def main():
                       f"{strand}\t{rank}\n")
 
     with open(args.out_regions, "w") as out:
-        out.write("qtl_id\tsrc_chrom\tsrc_start\tsrc_end\trank\ttgt_seqid\t"
-                  "aligned_bp\tn_aln_blocks\tpct_id\tstrand\ttgt_start\ttgt_end\t"
-                  "tgt_span\tn_tgt_genes\tn_miniprot\tn_rbh\n")
+        out.write("qtl_id\tsrc_chrom\tsrc_start\tsrc_end\tsrc_slice_len\trank\t"
+                  "tgt_seqid\taligned_bp\tn_aln_blocks\tpct_id\tstrand\t"
+                  "src_cov_bp\tsrc_cov_pct\tmarginal_cov_bp\tmarginal_cov_pct\t"
+                  "cum_src_cov_bp\tcum_src_cov_pct\t"
+                  "tgt_cov_bp\tunion_src_cov_bp\tunion_src_cov_pct\t"
+                  "tgt_start\ttgt_end\ttgt_span\tn_tgt_genes\tn_miniprot\tn_rbh\t"
+                  "consensus_src_chrom\tn_chrom_assigned\tn_chrom_rbh\tn_chrom_miniprot\t"
+                  "frac_on_qtl_chrom\thomoeolog_call\n")
         for r in regs:
             ng = sum(1 for g in tgt_genes if g[0] == r["tgt_seqid"])
             c = per_region[r["tgt_seqid"]]
+            hchrom, hn, h_nrbh, h_nmp, hfrac, hcall = homoeolog_call(r)
+            if args.drop_homoeologs and hcall.startswith("HOMOEOLOG"):
+                continue
             out.write(f"{args.qtl_id}\t{args.qtl_chrom}\t{args.qtl_start}\t{args.qtl_end}\t"
-                      f"{r['rank']}\t{r['tgt_seqid']}\t{r['aligned_bp']}\t"
-                      f"{r['n_aln_blocks']}\t{r['pct_id']:.1f}\t{r['strand']}\t"
+                      f"{r['src_slice_len']}\t{r['rank']}\t{r['tgt_seqid']}\t"
+                      f"{r['aligned_bp']}\t{r['n_aln_blocks']}\t{r['pct_id']:.1f}\t"
+                      f"{r['strand']}\t{r['src_cov_bp']}\t{r['src_cov_pct']:.2f}\t"
+                      f"{r['marginal_cov_bp']}\t{r['marginal_cov_pct']:.2f}\t"
+                      f"{r['cum_src_cov_bp']}\t{r['cum_src_cov_pct']:.2f}\t"
+                      f"{r['tgt_cov_bp']}\t{r['union_src_cov_bp']}\t"
+                      f"{r['union_src_cov_pct']:.2f}\t"
                       f"{r['tgt_start']}\t{r['tgt_end']}\t{r['tgt_end']-r['tgt_start']}\t"
-                      f"{ng}\t{c['miniprot']}\t{c['rbh']}\n")
+                      f"{ng}\t{c['miniprot']}\t{c['rbh']}\t"
+                      f"{hchrom}\t{hn}\t{h_nrbh}\t{h_nmp}\t{hfrac:.2f}\t{hcall}\n")
 
     n_mp = sum(1 for l in links if l["track"] == "miniprot")
     n_rb = sum(1 for l in links if l["track"] == "rbh")
+    calls = [homoeolog_call(r)[5] for r in regs]
+    n_hom = sum(1 for c in calls if c.startswith("HOMOEOLOG"))
+    n_conf = sum(1 for c in calls if "EVIDENCE_CONFLICT" in c)
+    if n_hom:
+        sys.stderr.write(
+            f"[annotate_regions] {args.qtl_id}: {n_hom}/{len(regs)} regions look "
+            f"HOMOEOLOGOUS (evidence={args.homoeolog_evidence}; their proteins point at "
+            f"a source chromosome other than {args.qtl_chrom}) - see homoeolog_call\n")
+    if n_conf:
+        sys.stderr.write(
+            f"[annotate_regions] {args.qtl_id}: {n_conf} region(s) where RBH and miniprot "
+            f"disagree on the source chromosome - flagged EVIDENCE_CONFLICT\n")
     sys.stderr.write(
         f"[annotate_regions] {args.qtl_id}: {len(regs)} regions, "
         f"{len(src_genes)} source genes in QTL, {len(tgt_genes)} target genes in regions, "
         f"{n_mp}/{n_mp_total} miniprot hits in-region, {n_rb}/{n_rbh_total} RBH in-region\n")
+
+    # Distinguish "no evidence" from "ids do not join" - these need very
+    # different fixes and look identical in the viewer.
+    if args.miniprot and n_mp_total == 0 and mp_seen:
+        sys.stderr.write(
+            f"[annotate_regions] WARNING: {mp_seen} miniprot hits in the file but none "
+            f"matched a gene id for this QTL. Example miniprot Target={mp_example!r}; "
+            f"example source gene id={next(iter(src_ids), None)!r}. Run bin/check_ids.py.\n")
+    if args.rbh and n_rbh_total and n_rb == 0 and rbh_resolved == 0:
+        sys.stderr.write(
+            f"[annotate_regions] WARNING: {n_rbh_total} RBH pairs in the file but none "
+            f"resolved to a gene. Example rbh query={rbh_example!r}; "
+            f"example source gene id={next(iter(src_ids), None)!r}. Run bin/check_ids.py.\n")
 
 
 if __name__ == "__main__":

@@ -25,12 +25,14 @@ include { RANK_DNA_REGIONS      } from '../../modules/local/rank_dna_regions'
 include { ANNOTATE_REGIONS      } from '../../modules/local/annotate_regions'
 include { BUILD_SYNTENY_HTML    } from '../../modules/local/build_synteny_html'
 include { BUILD_INDEX_HTML      } from '../../modules/local/build_index_html'
+include { EXTRACT_SELECTED_SCAFFOLDS } from '../../modules/local/extract_selected_scaffolds'
 
 workflow SYNTENY_VIEWS {
 
     take:
     ch_qtl
     ch_source_fa
+    ch_target_fa
     ch_target_index
     ch_source_genes
     ch_target_genes
@@ -82,6 +84,10 @@ workflow SYNTENY_VIEWS {
     BUILD_SYNTENY_HTML(ch_html_in, ch_source_expr, ch_target_expr)
     ch_versions = ch_versions.mix(BUILD_SYNTENY_HTML.out.versions.first())
 
+    // FASTA of the selected target sequences, for downstream work
+    EXTRACT_SELECTED_SCAFFOLDS(ANNOTATE_REGIONS.out.regions, ch_target_fa)
+    ch_versions = ch_versions.mix(EXTRACT_SELECTED_SCAFFOLDS.out.versions.first())
+
     BUILD_INDEX_HTML(
         ANNOTATE_REGIONS.out.regions.map { meta, f -> f }.collectFile(
             name: 'all_regions.tsv', keepHeader: true, skip: 1),
@@ -93,7 +99,9 @@ workflow SYNTENY_VIEWS {
     emit:
     regions  = ANNOTATE_REGIONS.out.regions
     links    = ANNOTATE_REGIONS.out.links
-    views    = BUILD_SYNTENY_HTML.out.html
+    views     = BUILD_SYNTENY_HTML.out.html
+    scaffolds = EXTRACT_SELECTED_SCAFFOLDS.out.full
+    windows   = EXTRACT_SELECTED_SCAFFOLDS.out.windows
     index    = BUILD_INDEX_HTML.out.html
     versions = ch_versions
 }

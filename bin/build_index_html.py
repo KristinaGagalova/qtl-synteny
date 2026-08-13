@@ -54,13 +54,14 @@ def main():
         if rs:
             top = rs[0]
             tgt  = html.escape(top["tgt_seqid"])
-            alnb = f'{int(top.get("aligned_bp", 0))/1000:.0f} kb'
+            cov  = f'{float(top.get("union_src_cov_pct", 0) or 0):.1f}%'
+            tcov = f'{float(top.get("src_cov_pct", 0) or 0):.1f}%'
             pid  = f'{float(top.get("pct_id", 0)):.1f}%'
             ngen = top.get("n_tgt_genes", "0")
             nmp  = top.get("n_miniprot", "0")
             nrbh = top.get("n_rbh", "0")
         else:
-            tgt = alnb = pid = ngen = nmp = nrbh = "&mdash;"
+            tgt = cov = tcov = pid = ngen = nmp = nrbh = "&mdash;"
         rows.append(
             "<tr>"
             f"<td>{label}</td>"
@@ -70,7 +71,8 @@ def main():
             f'<td class="num">{(e_-s_)/1e6:.2f} Mb</td>'
             f'<td class="num">{len(rs)}</td>'
             f"<td>{tgt}</td>"
-            f'<td class="num">{alnb}</td>'
+            f'<td class="num"><b>{cov}</b></td>'
+            f'<td class="num">{tcov}</td>'
             f'<td class="num">{pid}</td>'
             f'<td class="num">{ngen}</td>'
             f'<td class="num">{nmp}</td>'
@@ -90,10 +92,10 @@ th{{background:#f7f8fa;font-weight:600}} td.num{{text-align:right;font-variant-n
 a{{color:#2f6f9f}} tr:hover{{background:#f7f8fa}}
 </style></head><body>
 <header><h1>QTL synteny views</h1>
-<div class="sub">{len(qtls)} QTL intervals &middot; regions ranked by DNA alignment; miniprot and RBH columns count in-region protein evidence &middot; click a QTL to open its view</div></header>
+<div class="sub">{len(qtls)} QTL intervals &middot; &quot;QTL covered&quot; is the union of all displayed targets over the source interval (overlaps counted once); &quot;top covers&quot; is the best single target &middot; click a QTL to open its view</div></header>
 <div class="wrap"><table>
 <thead><tr><th>QTL</th><th>chrom</th><th>start</th><th>end</th><th>length</th>
-<th>regions</th><th>top target</th><th>aligned</th><th>% id</th>
+<th>regions</th><th>top target</th><th>QTL covered</th><th>top covers</th><th>% id</th>
 <th>genes</th><th>miniprot</th><th>RBH</th></tr></thead>
 <tbody>
 {body}

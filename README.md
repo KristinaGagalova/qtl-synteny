@@ -43,9 +43,10 @@ each syntenic target sequence as a lane below it, labelled with aligned bp,
 - **Solid orange curves** = reciprocal best hits
 - Toggle each of the three independently, or raise the identity floor.
 
-**Expression heatmap** — genes on X, samples on Y, source and target
-together. log2(x+1), raw, or per-gene z-score; restrict to source, target, or
-only genes carrying links.
+**Expression heatmap** — genes on X, samples on Y by default, with a
+**transpose** toggle to put genes on Y (useful with many samples: your 24
+Cadenza libraries make the default layout wide). log2(x+1), raw, or per-gene
+z-score; restrict to source, target, or only genes carrying links.
 
 **Expression table** — per-gene values with an `evidence` column showing
 which tracks support each gene. Sortable, CSV-downloadable.
@@ -87,10 +88,31 @@ Then open `results/views/index.html` and click through.
 | `--source_expression` / `--target_expression` | optional | `gene_id <TAB> sample1 <TAB> sample2 …` |
 | `--source_name` / `--target_name` | optional | display names |
 
-Expression tables are matched on the gene IDs in the corresponding
-annotation. Protein FASTA headers may be transcript IDs — the pipeline
-resolves gene ↔ transcript automatically, so `NorGene029.t1` in the proteome
-matches `NorGene029` in the GFF.
+### Gene IDs and the counts table
+
+Counts tables are `gene_id` in column 1, samples across the header
+(genes down the rows), e.g.
+
+```
+Genes                               Cad_PN143_0h_R1  Cad_PN143_0h_R2  ...
+TraesCAD_scaffold_000001_01G000100  0                0
+```
+
+Ensembl/EI GFF3 prefixes its IDs with the feature type
+(`ID=gene:TraesCAD_...`, `ID=transcript:TraesCAD_....1`) while counts tables
+and protein FASTAs use the bare accession. **These prefixes are now stripped
+automatically** — `gene:`, `transcript:`, `mRNA:`, `CDS:`, `protein:`,
+`exon:`, `rna:`, `ncRNA:` — so no flag is needed. An explicit `gene_id`
+attribute on the transcript is preferred when present.
+
+Matching then tries, in order: the gene id as-is, with any type prefix
+removed, with a trailing `.1` removed, and with `.1` added. The log reports
+`expression source: N/M genes matched` per QTL and warns loudly if nothing
+matched, so an ID mismatch is visible rather than showing an empty heatmap.
+
+Use `--source_gff_*` / `--target_gff_*` if the two annotations follow
+different conventions (`gff_feature`, `gff_id_attr`, `gff_strip_prefix`);
+each falls back to the shared `--gff_*` value.
 
 ## Key parameters
 

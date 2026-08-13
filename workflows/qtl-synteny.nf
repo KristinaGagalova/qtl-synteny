@@ -45,6 +45,7 @@ workflow QTL_SYNTENY_FLOW {
     SYNTENY_VIEWS(
         ch_qtl,
         ch_source_fa,
+        ch_target_fa,
         PREPARE_EVIDENCE.out.target_index,
         PREPARE_EVIDENCE.out.source_genes,
         PREPARE_EVIDENCE.out.target_genes,
