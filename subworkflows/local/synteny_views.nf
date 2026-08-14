@@ -65,8 +65,11 @@ workflow SYNTENY_VIEWS {
     RANK_DNA_REGIONS(MINIMAP2_REGION.out.paf)
     ch_versions = ch_versions.mix(RANK_DNA_REGIONS.out.versions.first())
 
-    // STEPS 3 + 4: intersect the genome-wide protein evidence with the regions
+    // STEPS 3 + 4: intersect the genome-wide protein evidence with the
+    // regions. The PAF is passed through too, so ANNOTATE_REGIONS can split
+    // source coverage into gene-bearing vs gene-less scaffolds.
     ch_ann_in = RANK_DNA_REGIONS.out.regions
+        .join(MINIMAP2_REGION.out.paf)
         .combine(ch_source_genes)
         .combine(ch_target_genes)
         .combine(ch_miniprot)
@@ -80,6 +83,7 @@ workflow SYNTENY_VIEWS {
         .join(ANNOTATE_REGIONS.out.links)
         .join(ANNOTATE_REGIONS.out.genes)
         .join(MINIMAP2_REGION.out.paf)
+        .join(ANNOTATE_REGIONS.out.coverage)
 
     BUILD_SYNTENY_HTML(ch_html_in, ch_source_expr, ch_target_expr)
     ch_versions = ch_versions.mix(BUILD_SYNTENY_HTML.out.versions.first())

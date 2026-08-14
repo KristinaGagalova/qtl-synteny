@@ -217,10 +217,18 @@ svg{display:block}
 text{font:11px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
 .axis{fill:var(--muted);font-size:10px}
 .empty{color:var(--muted);padding:14px 12px;font-style:italic}
+.badges{display:flex;gap:10px;margin-top:10px}
+.badge{flex:1;border:1px solid var(--line);border-radius:6px;padding:8px 12px;background:#fff}
+.badge .num{font-size:20px;font-weight:700;line-height:1.1}
+.badge .lbl{font-size:11px;color:var(--muted);margin-top:2px}
+.badge.with .num{color:var(--src)}
+.badge.without .num{color:#8a6d1a}
+.badge.total .num{color:var(--ink)}
 </style></head><body>
 <header>
   <h1>__TITLE__</h1>
   <div class="sub">__SUBTITLE__</div>
+  <div class="badges" id="covBadges"></div>
 </header>
 <div class="wrap">
 
@@ -232,6 +240,8 @@ text{font:11px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-
       <label><input type="checkbox" id="cbRbh" checked> reciprocal best hits</label>
       <label>Min % identity <input type="range" id="rgIdent" min="0" max="100" value="0" style="width:110px"><span id="lbIdent">0</span></label>
       <button id="btnReset">Clear selection</button>
+      <button id="btnClearLane" style="display:none">Show all regions</button>
+      <span id="laneHint" class="sub" style="display:none">click a target label to isolate it</span>
     </div>
     <div class="legend">
       <span><i class="key" style="background:var(--src)"></i>source gene</span>
@@ -239,7 +249,7 @@ text{font:11px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-
       <span><i class="key" style="background:#b9c3d0"></i>DNA block (defines the region)</span>
       <span><i class="key" style="background:var(--mp)"></i>miniprot placement</span>
       <span><i class="key" style="background:var(--rbh)"></i>reciprocal best hit</span>
-      <span>gene arrows show strand &middot; click a gene to pin it</span>
+      <span>gene arrows show strand &middot; click a gene to pin it &middot; click a target label to isolate that region</span>
     </div>
     <div class="body"><svg id="syn"></svg></div>
   </div>
@@ -287,6 +297,7 @@ text{font:11px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-
 const DATA = __DATA__;
 const tip = document.getElementById('tip');
 let SEL = null;            // selected gene id
+let SEL_LANE = null;       // selected target region rank (isolates one lane)
 const state = {aln:true, miniprot:true, rbh:true, minIdent:0,
                scale:'log', which:'both', linkedOnly:false, transpose:false};
 
@@ -304,7 +315,7 @@ const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'
 function drawSynteny(){
   const svg = document.getElementById('syn');
   const W = Math.max(1100, (DATA.regions.length ? 1100 : 900));
-  const laneH = 54, gap = 64, padL = 150, padR = 24, top = 44;
+  const laneH = 54, gap = 76, padL = 150, padR = 24, top = 44;
   const trackW = W - padL - padR;
   const nLanes = 1 + DATA.regions.length;
   const H = top + nLanes * laneH + (nLanes - 1) * gap + 20;
@@ -323,6 +334,8 @@ function drawSynteny(){
     return {r, y: top + (i + 1) * (laneH + gap),
             x: p => padL + (Math.min(Math.max(p, r.tgt_start), r.tgt_end) - r.tgt_start) / len * trackW};
   });
+  const isDim = r => SEL_LANE != null && r.rank !== SEL_LANE;
+  const DIM = 0.12;  // opacity multiplier for faded (non-selected) content
 
   function axis(y, label, a, b, xf){
     let o = `<line x1="${padL}" y1="${y+26}" x2="${padL+trackW}" y2="${y+26}" stroke="var(--line)"/>`;
@@ -348,9 +361,11 @@ function drawSynteny(){
         const x4 = lane.x(b.strand === '+' ? b.ts : b.te);
         const yA = srcY + 26, yB = lane.y + 8;
         const inv = b.strand === '-';
+        const dim = isDim(lane.r);
+        const fop = (dim ? DIM : 1) * 0.5;
         s += `<path d="M${x1},${yA} L${x2},${yA} L${x3},${yB} L${x4},${yB} Z"
-               fill="${inv ? '#e8d5c4' : '#b9c3d0'}" fill-opacity=".5" stroke="none"
-               data-tip="DNA block &middot; ${b.alnlen.toLocaleString()} bp &middot; ${(100*b.nmatch/b.alnlen).toFixed(1)}% id &middot; strand ${b.strand} &middot; MAPQ ${b.mapq}"></path>`;
+               fill="${dim ? '#c7ccd3' : (inv ? '#e8d5c4' : '#b9c3d0')}" fill-opacity="${fop}" stroke="none"
+               ${dim ? '' : `data-tip="DNA block &middot; ${b.alnlen.toLocaleString()} bp &middot; ${(100*b.nmatch/b.alnlen).toFixed(1)}% id &middot; strand ${b.strand} &middot; MAPQ ${b.mapq}"`}></path>`;
       }
     }
   }
@@ -367,32 +382,34 @@ function drawSynteny(){
         const x2 = lane.x((l.tgt_start + l.tgt_end)/2);
         const yA = srcY + 26, yB = lane.y + 8;
         const my = (yA + yB)/2;
-        const isSel = SEL && (l.src_gene === SEL || l.tgt_gene === SEL);
+        const dim = isDim(lane.r);
+        const isSel = !dim && SEL && (l.src_gene === SEL || l.tgt_gene === SEL);
         const isRbh = l.track === 'rbh';
-        const col = isSel ? 'var(--sel)' : (isRbh ? 'var(--rbh)' : 'var(--mp)');
+        const col = dim ? '#c7ccd3' : (isSel ? 'var(--sel)' : (isRbh ? 'var(--rbh)' : 'var(--mp)'));
         const w = isSel ? 2.2 : (isRbh ? 1.6 : 1.0);
-        const op = isSel ? 1 : (isRbh ? .9 : .55);
+        const op = (dim ? DIM : 1) * (isSel ? 1 : (isRbh ? .9 : .55));
         const dash = isRbh ? '' : ' stroke-dasharray="3,2"';
         const partner = l.tgt_gene ? esc(l.tgt_gene) : '(unannotated locus)';
         s += `<path d="M${x1},${yA} C${x1},${my} ${x2},${my} ${x2},${yB}"
                fill="none" stroke="${col}" stroke-width="${w}" stroke-opacity="${op}"${dash}
-               data-tip="<b>${isRbh ? 'RBH' : 'miniprot'}</b><br>${esc(l.src_gene)} &rarr; ${partner}<br>${l.pident.toFixed(1)}% id${l.bits ? ' &middot; bits ' + l.bits : ''}"></path>`;
+               ${dim ? '' : `data-tip="<b>${isRbh ? 'RBH' : 'miniprot'}</b><br>${esc(l.src_gene)} &rarr; ${partner}<br>${l.pident.toFixed(1)}% id${l.bits ? ' &middot; bits ' + l.bits : ''}"`}></path>`;
       }
     }
   }
 
-  function geneArrow(g, x1, x2, y, fill){
+  function geneArrow(g, x1, x2, y, fill, dim){
     const h = 11, tipw = Math.min(6, Math.max(2, x2 - x1));
-    const sel = SEL === g.gene_id;
-    const f = sel ? 'var(--sel)' : fill;
+    const sel = !dim && SEL === g.gene_id;
+    const f = dim ? '#c7ccd3' : (sel ? 'var(--sel)' : fill);
     let d;
     if (g.strand === '-')
       d = `M${x2},${y} L${x1+tipw},${y} L${x1},${y+h/2} L${x1+tipw},${y+h} L${x2},${y+h} Z`;
     else
       d = `M${x1},${y} L${x2-tipw},${y} L${x2},${y+h/2} L${x2-tipw},${y+h} L${x1},${y+h} Z`;
-    return `<path class="gene" d="${d}" fill="${f}" stroke="${sel ? 'var(--sel)' : 'none'}"
-             stroke-width="${sel ? 1.5 : 0}" data-gene="${esc(g.gene_id)}"
-             data-tip="<b>${esc(g.gene_id)}</b><br>${esc(g.seqid)}:${g.start.toLocaleString()}-${g.end.toLocaleString()} (${g.strand})"></path>`;
+    const clickable = dim ? '' : `class="gene" data-gene="${esc(g.gene_id)}"`;
+    const tip = dim ? '' : `data-tip="<b>${esc(g.gene_id)}</b><br>${esc(g.seqid)}:${g.start.toLocaleString()}-${g.end.toLocaleString()} (${g.strand})"`;
+    return `<path ${clickable} d="${d}" fill="${f}" fill-opacity="${dim ? DIM : 1}"
+             stroke="${sel ? 'var(--sel)' : 'none'}" stroke-width="${sel ? 1.5 : 0}" ${tip}></path>`;
   }
 
   // coverage strip: union of every displayed target's blocks, so gaps in
@@ -414,33 +431,50 @@ function drawSynteny(){
              data-tip="covered ${a.toLocaleString()}-${b.toLocaleString()}"></rect>`;
     }
     const cov = DATA.coverage || {};
-    s += `<text x="8" y="${cy+7}" class="axis">covered ${(cov.union_pct||0).toFixed(1)}%</text>`;
+    s += `<text x="8" y="${cy+7}" class="axis">gene-evidence coverage ${(cov.with_genes_pct||0).toFixed(1)}%</text>`;
   }
 
   // source lane
   s += axis(srcY, 'SOURCE', src.start, src.end, sx);
   s += `<text x="8" y="${srcY+30}" class="axis">${esc(src.chrom)}</text>`;
+  const selRegion = SEL_LANE == null ? null : DATA.regions.find(r => r.rank === SEL_LANE);
+  const linkedSrcGenes = selRegion
+    ? new Set(DATA.links.filter(l => l.tgt_seqid === selRegion.tgt_seqid).map(l => l.src_gene))
+    : null;
   for (const g of DATA.source_genes){
     const x1 = sx(g.start), x2 = Math.max(sx(g.end), sx(g.start) + 2.5);
-    s += geneArrow(g, x1, x2, srcY + 10, 'var(--src)');
+    const dimGene = selRegion != null && !linkedSrcGenes.has(g.gene_id);
+    s += geneArrow(g, x1, x2, srcY + 10, 'var(--src)', dimGene);
   }
 
   // target lanes
   for (const lane of lanes){
     const r = lane.r;
+    const dim = isDim(r);
+    const active = SEL_LANE === r.rank;
+    const lop = dim ? DIM : 1;
+    if (active){
+      s += `<rect x="4" y="${lane.y-38}" width="${padL+trackW-8}" height="${laneH+34}"
+             fill="var(--sel)" fill-opacity=".06" stroke="var(--sel)" stroke-opacity=".4"
+             stroke-width="1" rx="4"></rect>`;
+    }
     s += axis(lane.y - 18, `TARGET #${r.rank}`, r.tgt_start, r.tgt_end, lane.x);
-    s += `<text x="8" y="${lane.y+2}" class="axis">${esc(r.tgt_seqid)}</text>`;
-    s += `<text x="8" y="${lane.y+16}" class="axis" font-weight="600">covers ${r.src_cov_pct.toFixed(1)}% of QTL</text>`;
-    s += `<text x="8" y="${lane.y+28}" class="axis">+${r.marginal_cov_pct.toFixed(1)}% new &middot; ${r.pct_id.toFixed(0)}% id &middot; cum ${r.cum_src_cov_pct.toFixed(1)}%</text>`;
-    s += `<text x="8" y="${lane.y+40}" class="axis">${r.n_tgt_genes} genes &middot; ${r.n_miniprot} mp &middot; ${r.n_rbh} rbh</text>`;
-    if (r.homoeolog_call && (r.homoeolog_call.startsWith('HOMOEOLOG') || r.homoeolog_call.includes('CONFLICT')))
-      s += `<text x="8" y="${lane.y+52}" class="axis" fill="var(--rbh)" font-weight="700"
-             data-tip="Proteins here point at ${esc(r.consensus_src_chrom)}, not the QTL's chromosome (${r.n_chrom_rbh} RBH, ${r.n_chrom_miniprot} miniprot) &mdash; likely a homoeologous copy">&#9888; ${esc(r.homoeolog_call)}</text>`;
+    s += `<g class="laneLabel" data-lane="${r.rank}" opacity="${lop}" style="cursor:pointer">
+      <rect x="4" y="${lane.y-14}" width="140" height="70" fill="transparent"></rect>
+      <text x="8" y="${lane.y+2}" class="axis" font-weight="${active?700:400}">${esc(r.tgt_seqid)} &#128269;</text>
+      <text x="8" y="${lane.y+16}" class="axis" font-weight="600">covers ${r.src_cov_pct.toFixed(1)}% of QTL</text>
+      <text x="8" y="${lane.y+28}" class="axis">${r.pct_id.toFixed(0)}% id &middot; ${(r.aligned_bp/1000).toFixed(0)}kb aligned</text>
+      <text x="8" y="${lane.y+40}" class="axis">${r.n_tgt_genes} genes &middot; ${r.n_miniprot} mp &middot; ${r.n_rbh} rbh</text>
+      ${r.group_size > 1 ? `<text x="8" y="${lane.y+52}" class="axis" fill="${r.is_primary_in_group ? '#1a7a4c' : '#8a6d1a'}" font-weight="700"
+             >${r.is_primary_in_group ? `&#9733; best match (group of ${r.group_size})` : `&#8635; possible copy of ${esc(r.group_best_scaffold)}`}</text>` : ''}
+      ${(r.homoeolog_call && (r.homoeolog_call.startsWith('HOMOEOLOG') || r.homoeolog_call.includes('CONFLICT'))) ?
+        `<text x="8" y="${lane.y+52}" class="axis" fill="var(--rbh)" font-weight="700">&#9888; ${esc(r.homoeolog_call)}</text>` : ''}
+    </g>`;
     for (const g of DATA.target_genes){
       if (g.seqid !== r.tgt_seqid) continue;
       if (g.end < r.tgt_start || g.start > r.tgt_end) continue;
       const x1 = lane.x(g.start), x2 = Math.max(lane.x(g.end), lane.x(g.start) + 2.5);
-      s += geneArrow(g, x1, x2, lane.y + 8, 'var(--tgt)');
+      s += geneArrow(g, x1, x2, lane.y + 8, 'var(--tgt)', isDim(r));
     }
   }
 
@@ -453,11 +487,46 @@ function drawSynteny(){
     el.addEventListener('mouseleave', hideTip);
   });
   svg.querySelectorAll('[data-gene]').forEach(el => {
-    el.addEventListener('click', () => { SEL = (SEL === el.dataset.gene) ? null : el.dataset.gene; redraw(); });
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      SEL = (SEL === el.dataset.gene) ? null : el.dataset.gene; redraw();
+    });
   });
+  svg.querySelectorAll('.laneLabel').forEach(el => {
+    el.addEventListener('click', () => {
+      const rank = +el.dataset.lane;
+      SEL_LANE = (SEL_LANE === rank) ? null : rank;
+      redraw();
+    });
+  });
+  updateLaneControls();
+}
+
+function updateLaneControls(){
+  const btn = document.getElementById('btnClearLane');
+  const hint = document.getElementById('laneHint');
+  if (SEL_LANE != null){
+    btn.style.display = '';
+    btn.textContent = `Show all regions (isolating #${SEL_LANE})`;
+    hint.style.display = 'none';
+  } else {
+    btn.style.display = 'none';
+    hint.style.display = DATA.regions.length > 1 ? '' : 'none';
+  }
 }
 
 /* -------------------------------------------------------------- heatmap */
+function laneFilter(){
+  // when a region is isolated, restrict to: that region's target genes, and
+  // source genes linked into it. Returns null when nothing is isolated.
+  if (SEL_LANE == null) return null;
+  const r = DATA.regions.find(x => x.rank === SEL_LANE);
+  if (!r) return null;
+  const tgtIds = new Set(DATA.target_genes.filter(g => g.seqid === r.tgt_seqid).map(g => g.gene_id));
+  const srcIds = new Set(DATA.links.filter(l => l.tgt_seqid === r.tgt_seqid).map(l => l.src_gene));
+  return {tgtIds, srcIds, seqid: r.tgt_seqid};
+}
+
 function heatGenes(){
   let gs = [];
   const linked = new Set();
@@ -465,6 +534,8 @@ function heatGenes(){
   if (state.which !== 'tgt') gs = gs.concat(DATA.source_genes.map(g => ({...g, side:'src'})));
   if (state.which !== 'src') gs = gs.concat(DATA.target_genes.map(g => ({...g, side:'tgt'})));
   if (state.linkedOnly) gs = gs.filter(g => linked.has(g.gene_id));
+  const lf = laneFilter();
+  if (lf) gs = gs.filter(g => g.side === 'src' ? lf.srcIds.has(g.gene_id) : lf.tgtIds.has(g.gene_id));
   return gs.filter(g => (g.side === 'src' ? DATA.expr_src : DATA.expr_tgt)[g.gene_id]);
 }
 
@@ -605,8 +676,11 @@ function tableRows(){
                evidence: [...new Set(ls.map(l => l.track))].join('+'),
                vals:v, samples});
   };
-  DATA.source_genes.forEach(g => add(g, 'src', DATA.samples_src, DATA.expr_src));
-  DATA.target_genes.forEach(g => add(g, 'tgt', DATA.samples_tgt, DATA.expr_tgt));
+  const lf = laneFilter();
+  const srcGenes = lf ? DATA.source_genes.filter(g => lf.srcIds.has(g.gene_id)) : DATA.source_genes;
+  const tgtGenes = lf ? DATA.target_genes.filter(g => lf.tgtIds.has(g.gene_id)) : DATA.target_genes;
+  srcGenes.forEach(g => add(g, 'src', DATA.samples_src, DATA.expr_src));
+  tgtGenes.forEach(g => add(g, 'tgt', DATA.samples_tgt, DATA.expr_tgt));
   return SEL ? rows.filter(r => r.gene === SEL ||
       DATA.links.some(l => (l.src_gene===SEL && l.tgt_gene===r.gene) ||
                            (l.tgt_gene===SEL && l.src_gene===r.gene))) : rows;
@@ -649,19 +723,30 @@ function drawTable(){
   t.querySelectorAll('tr[data-gene]').forEach(tr => tr.addEventListener('click', ()=>{
     SEL = (SEL === tr.dataset.gene) ? null : tr.dataset.gene; redraw();
   }));
-  document.getElementById('tblNote').textContent =
-    SEL ? `filtered to ${esc(SEL)} and its linked partners (${rows.length} rows)`
-        : `click a gene above to filter — showing all ${rows.length} rows`;
+  const noteParts = [];
+  if (SEL_LANE != null) noteParts.push(`isolated to region #${SEL_LANE}`);
+  if (SEL) noteParts.push(`filtered to ${esc(SEL)} and its linked partners`);
+  document.getElementById('tblNote').textContent = noteParts.length
+    ? `${noteParts.join(', ')} (${rows.length} rows)`
+    : `click a gene above to filter — showing all ${rows.length} rows`;
 }
 
 function drawRegions(){
   const t = document.getElementById('regTbl');
   if (!DATA.regions.length){ t.innerHTML = '<tbody><tr><td class="empty">none</td></tr></tbody>'; return; }
-  const cols = ['rank','tgt_seqid','src_cov_bp','src_cov_pct','marginal_cov_pct','cum_src_cov_pct','aligned_bp','n_aln_blocks','pct_id','strand','tgt_cov_bp','n_tgt_genes','n_miniprot','n_rbh','consensus_src_chrom','n_chrom_rbh','n_chrom_miniprot','frac_on_qtl_chrom','homoeolog_call','tgt_start','tgt_end','tgt_span'];
+  const cols = ['rank','tgt_seqid','src_cov_bp','src_cov_pct','aligned_bp','n_aln_blocks','pct_id','strand','tgt_cov_bp','n_tgt_genes','n_miniprot','n_rbh','region_group','group_size','is_primary_in_group','group_best_scaffold','consensus_src_chrom','n_chrom_rbh','n_chrom_miniprot','frac_on_qtl_chrom','homoeolog_call','tgt_start','tgt_end','tgt_span'];
   let h = '<thead><tr>' + cols.map(c=>`<th>${c}</th>`).join('') + '</tr></thead><tbody>';
-  for (const r of DATA.regions)
-    h += '<tr>' + cols.map(c=>`<td class="${typeof r[c]==='number'?'num':''}">${esc(r[c])}</td>`).join('') + '</tr>';
+  for (const r of DATA.regions){
+    const active = SEL_LANE === r.rank;
+    h += `<tr class="${active?'sel':''}" data-lane="${r.rank}" style="cursor:pointer">`
+       + cols.map(c=>`<td class="${typeof r[c]==='number'?'num':''}">${esc(r[c])}</td>`).join('') + '</tr>';
+  }
   t.innerHTML = h + '</tbody>';
+  t.querySelectorAll('tr[data-lane]').forEach(tr => tr.addEventListener('click', () => {
+    const rank = +tr.dataset.lane;
+    SEL_LANE = (SEL_LANE === rank) ? null : rank;
+    redraw();
+  }));
 }
 
 function downloadCsv(){
@@ -679,7 +764,7 @@ function downloadCsv(){
   a.click();
 }
 
-function redraw(){ drawSynteny(); drawHeat(); drawTable(); }
+function redraw(){ drawSynteny(); drawHeat(); drawTable(); drawRegions(); }
 
 document.getElementById('cbAln').onchange = e => { state.aln = e.target.checked; drawSynteny(); };
 document.getElementById('cbMiniprot').onchange = e => { state.miniprot = e.target.checked; drawSynteny(); };
@@ -694,9 +779,28 @@ document.getElementById('selWhich').onchange = e => { state.which = e.target.val
 document.getElementById('cbLinkedOnly').onchange = e => { state.linkedOnly = e.target.checked; drawHeat(); };
 document.getElementById('cbTranspose').onchange = e => { state.transpose = e.target.checked; drawHeat(); };
 document.getElementById('btnReset').onclick = () => { SEL = null; redraw(); };
+document.getElementById('btnClearLane').onclick = () => { SEL_LANE = null; redraw(); };
 document.getElementById('btnCsv').onclick = downloadCsv;
 
-drawRegions(); redraw();
+function drawCoverageBadges(){
+  const c = DATA.coverage || {};
+  const el = document.getElementById('covBadges');
+  el.innerHTML = `
+    <div class="badge with">
+      <div class="num">${(c.with_genes_pct||0).toFixed(1)}%</div>
+      <div class="lbl">covered by scaffolds WITH gene evidence (${(c.with_genes_bp||0).toLocaleString()} bp)</div>
+    </div>
+    <div class="badge without">
+      <div class="num">${(c.without_genes_pct||0).toFixed(1)}%</div>
+      <div class="lbl">covered ONLY by gene-less scaffolds (${(c.without_genes_bp||0).toLocaleString()} bp)</div>
+    </div>
+    <div class="badge total">
+      <div class="num">${(c.total_pct||0).toFixed(1)}%</div>
+      <div class="lbl">total DNA coverage, any evidence (${(c.total_bp||0).toLocaleString()} of ${(c.slice_len||0).toLocaleString()} bp)</div>
+    </div>`;
+}
+
+drawCoverageBadges(); drawRegions(); redraw();
 </script></body></html>
 """
 
@@ -712,43 +816,64 @@ def main():
     ap.add_argument("--regions", required=True, help="annotate_regions.py --out-regions")
     ap.add_argument("--links", required=True, help="annotate_regions.py --out-links")
     ap.add_argument("--genes", required=True, help="annotate_regions.py --out-genes")
+    ap.add_argument("--coverage", help="annotate_regions.py --out-coverage")
     ap.add_argument("--paf", help="source QTL slice vs target")
     ap.add_argument("--source-expr")
     ap.add_argument("--target-expr")
     ap.add_argument("--out", required=True)
     ap.add_argument("--flank", type=int, default=0)
+    ap.add_argument("--show-empty-regions", action="store_true",
+                    help="also draw lanes for scaffolds with no RBH or "
+                         "miniprot evidence (default: hidden, since a "
+                         "gene-less scaffold gives nothing to inspect here)")
     args = ap.parse_args()
 
     regions = [r for r in read_tsv(args.regions) if r["qtl_id"] == args.qtl_id]
     links   = [l for l in read_tsv(args.links)   if l["qtl_id"] == args.qtl_id]
     genes   = [g for g in read_tsv(args.genes)   if g["qtl_id"] == args.qtl_id]
 
-    reg_out, tgt_seqids = [], []
+    all_regions = []
     for r in regions:
-        reg_out.append(dict(
+        all_regions.append(dict(
             rank=int(r["rank"]), tgt_seqid=r["tgt_seqid"],
             aligned_bp=int(r["aligned_bp"]), n_aln_blocks=int(r["n_aln_blocks"]),
             pct_id=float(r["pct_id"]), strand=r["strand"],
             src_cov_bp=int(r.get("src_cov_bp", 0) or 0),
             src_cov_pct=float(r.get("src_cov_pct", 0) or 0),
-            marginal_cov_pct=float(r.get("marginal_cov_pct", 0) or 0),
             homoeolog_call=r.get("homoeolog_call", "NA"),
             consensus_src_chrom=r.get("consensus_src_chrom", "NA"),
             frac_on_qtl_chrom=float(r.get("frac_on_qtl_chrom", 0) or 0),
             n_chrom_rbh=int(r.get("n_chrom_rbh", 0) or 0),
             n_chrom_miniprot=int(r.get("n_chrom_miniprot", 0) or 0),
-            cum_src_cov_pct=float(r.get("cum_src_cov_pct", 0) or 0),
             tgt_cov_bp=int(r.get("tgt_cov_bp", 0) or 0),
             n_tgt_genes=int(r.get("n_tgt_genes", 0) or 0),
             n_miniprot=int(r.get("n_miniprot", 0) or 0),
             n_rbh=int(r.get("n_rbh", 0) or 0),
+            region_group=int(r.get("region_group", 0) or 0),
+            group_size=int(r.get("group_size", 1) or 1),
+            is_primary_in_group=int(r.get("is_primary_in_group", 1) or 0),
+            group_best_scaffold=r.get("group_best_scaffold", ""),
             tgt_start=int(r["tgt_start"]), tgt_end=int(r["tgt_end"]),
             tgt_span=int(r["tgt_span"])))
-        tgt_seqids.append(r["tgt_seqid"])
-    reg_out.sort(key=lambda x: x["rank"])
+    all_regions.sort(key=lambda x: x["rank"])
+
+    # The viewer is for INSPECTING evidence: a scaffold with zero RBH and zero
+    # miniprot hits has nothing to look at (it may still be real DNA homology,
+    # but there is no protein-level signal to examine here), so it is hidden
+    # by default. It still exists in --regions / the FASTA output upstream -
+    # this filter only affects what gets drawn.
+    if args.show_empty_regions:
+        reg_out = all_regions
+    else:
+        reg_out = [r for r in all_regions if r["n_miniprot"] > 0 or r["n_rbh"] > 0]
+    n_hidden_empty = len(all_regions) - len(reg_out)
+    tgt_seqids = [r["tgt_seqid"] for r in reg_out]
 
     link_out = []
+    shown = set(tgt_seqids)
     for l in links:
+        if l["tgt_seqid"] not in shown:
+            continue
         link_out.append(dict(
             track=l["track"], src_gene=l["src_gene"],
             src_start=int(l["src_start"]), src_end=int(l["src_end"]),
@@ -762,7 +887,7 @@ def main():
                  for g in genes if g["side"] == "source"]
     tgt_genes = [dict(gene_id=g["gene_id"], seqid=g["seqid"], start=int(g["start"]),
                       end=int(g["end"]), strand=g["strand"])
-                 for g in genes if g["side"] == "target"]
+                 for g in genes if g["side"] == "target" and g["seqid"] in shown]
 
     view_start = max(args.qtl_start - args.flank, 0)
     view_end = args.qtl_end + args.flank
@@ -774,6 +899,17 @@ def main():
 
     alignments = read_paf(args.paf, tgt_seqids)
 
+    cov_rows = read_tsv(args.coverage) if args.coverage else []
+    cov_row = next((c for c in cov_rows if c["qtl_id"] == args.qtl_id), None)
+    coverage = dict(
+        with_genes_bp=int(cov_row["cov_with_genes_bp"]) if cov_row else 0,
+        with_genes_pct=float(cov_row["cov_with_genes_pct"]) if cov_row else 0.0,
+        without_genes_bp=int(cov_row["cov_without_genes_bp"]) if cov_row else 0,
+        without_genes_pct=float(cov_row["cov_without_genes_pct"]) if cov_row else 0.0,
+        total_bp=int(cov_row["cov_total_bp"]) if cov_row else 0,
+        total_pct=float(cov_row["cov_total_pct"]) if cov_row else 0.0,
+        slice_len=int(cov_row["src_slice_len"]) if cov_row else 0)
+
     data = dict(
         qtl_id=args.qtl_id,
         source=dict(chrom=args.qtl_chrom, start=view_start, end=view_end,
@@ -782,19 +918,22 @@ def main():
         source_genes=src_genes, target_genes=tgt_genes,
         samples_src=samples_src, samples_tgt=samples_tgt,
         expr_src=expr_src, expr_tgt=expr_tgt,
-        alignments=alignments)
+        alignments=alignments, coverage=coverage,
+        n_hidden_empty=n_hidden_empty, n_all_regions=len(all_regions))
 
     n_mp = sum(1 for l in link_out if l["track"] == "miniprot")
     n_rb = sum(1 for l in link_out if l["track"] == "rbh")
-    union_pct = float(regions[0].get("union_src_cov_pct", 0) or 0) if regions else 0.0
-    union_bp = int(regions[0].get("union_src_cov_bp", 0) or 0) if regions else 0
-    slice_len = int(regions[0].get("src_slice_len", 0) or 0) if regions else 0
-    data["coverage"] = dict(union_bp=union_bp, union_pct=union_pct, slice_len=slice_len)
+    n_groups_multi = len({r["region_group"] for r in reg_out
+                          if r["group_size"] > 1})
+    hidden_note = (f" &middot; {n_hidden_empty} gene-less scaffold(s) hidden"
+                  if n_hidden_empty else "")
     sub = (f"{args.qtl_chrom}:{args.qtl_start:,}-{args.qtl_end:,} "
-           f"&middot; <b>{union_pct:.1f}% of the source region covered</b> "
-           f"({union_bp:,} of {slice_len:,} bp) by {len(reg_out)} targets "
+           f"&middot; <b>{coverage['with_genes_pct']:.1f}% covered with gene evidence</b>, "
+           f"{coverage['without_genes_pct']:.1f}% gene-less, "
+           f"{coverage['total_pct']:.1f}% total "
+           f"&middot; {len(reg_out)} scaffolds shown{hidden_note} "
+           f"&middot; {n_groups_multi} possible-genome-copy group(s) "
            f"&middot; {len(alignments)} DNA blocks "
-           f"&middot; {len(src_genes)} source genes, {len(tgt_genes)} target genes "
            f"&middot; {n_mp} miniprot, {n_rb} RBH links")
 
     html = (HTML.replace("__TITLE__", args.qtl_id)
@@ -803,7 +942,8 @@ def main():
     with open(args.out, "w") as fh:
         fh.write(html)
     sys.stderr.write(f"[build_synteny_html] {args.out} ({len(src_genes)} src, "
-                     f"{len(tgt_genes)} tgt genes, {n_mp} miniprot, {n_rb} rbh, "
+                     f"{len(tgt_genes)} tgt genes, {len(reg_out)}/{len(all_regions)} "
+                     f"scaffolds shown, {n_mp} miniprot, {n_rb} rbh, "
                      f"{len(alignments)} aln blocks)\n")
 
 

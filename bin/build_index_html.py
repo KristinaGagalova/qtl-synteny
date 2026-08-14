@@ -48,11 +48,15 @@ def main():
     rows = []
     for qid, chrom, s_, e_ in qtls:
         rs = sorted(reg.get(qid, []), key=lambda x: int(x["rank"]))
+        rs_gene = [r for r in rs
+                  if int(r.get("n_miniprot", 0) or 0) or int(r.get("n_rbh", 0) or 0)]
         v = view_for(qid)
         label = (f'<a href="{html.escape(v)}">{html.escape(qid)}</a>'
                  if v else html.escape(qid))
-        if rs:
-            top = rs[0]
+        n_groups_multi = len({r["region_group"] for r in rs
+                              if int(r.get("group_size", 1) or 1) > 1})
+        if rs_gene:
+            top = rs_gene[0]
             tgt  = html.escape(top["tgt_seqid"])
             cov  = f'{float(top.get("union_src_cov_pct", 0) or 0):.1f}%'
             tcov = f'{float(top.get("src_cov_pct", 0) or 0):.1f}%'

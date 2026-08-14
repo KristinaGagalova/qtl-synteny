@@ -37,8 +37,11 @@ def read_regions(path, qtl_id, drop_homoeologs=False):
                 start=int(f[i["tgt_start"]]), end=int(f[i["tgt_end"]]),
                 src_cov_pct=f[i["src_cov_pct"]] if "src_cov_pct" in i else "NA",
                 pct_id=f[i["pct_id"]] if "pct_id" in i else "NA",
+                n_tgt_genes=int(f[i["n_tgt_genes"]]) if "n_tgt_genes" in i else 0,
+                region_group=f[i["region_group"]] if "region_group" in i else "NA",
+                group_size=f[i["group_size"]] if "group_size" in i else "1",
+                is_primary=f[i["is_primary_in_group"]] if "is_primary_in_group" in i else "1",
                 call=call))
-    regs.sort(key=lambda r: r["rank"])
     return regs
 
 
@@ -52,17 +55,31 @@ def main():
     ap.add_argument("--out-window", required=True)
     ap.add_argument("--out-list", required=True)
     ap.add_argument("--drop-homoeologs", action="store_true")
+    ap.add_argument("--gene-priority", dest="gene_priority", action="store_true",
+                    default=True,
+                    help="list/write scaffolds that carry annotated genes "
+                         "before gene-less ones (default: on)")
+    ap.add_argument("--no-gene-priority", dest="gene_priority", action="store_false")
     args = ap.parse_args()
 
     regs = read_regions(args.regions, args.qtl_id, args.drop_homoeologs)
+    if args.gene_priority:
+        # scaffolds carrying genes first, ties broken by the original rank
+        # (i.e. coverage/greedy order) so priority is genes, then evidence
+        regs.sort(key=lambda r: (r["n_tgt_genes"] == 0, r["rank"]))
+    else:
+        regs.sort(key=lambda r: r["rank"])
     wanted = {r["seqid"]: r for r in regs}
 
     with open(args.out_list, "w") as lo:
-        lo.write("qtl_id\trank\ttgt_seqid\ttgt_start\ttgt_end\tsrc_cov_pct\t"
-                 "pct_id\thomoeolog_call\n")
-        for r in regs:
-            lo.write(f"{args.qtl_id}\t{r['rank']}\t{r['seqid']}\t{r['start']}\t"
-                     f"{r['end']}\t{r['src_cov_pct']}\t{r['pct_id']}\t{r['call']}\n")
+        lo.write("list_order\tqtl_id\trank\ttgt_seqid\ttgt_start\ttgt_end\t"
+                 "n_tgt_genes\tsrc_cov_pct\tpct_id\tregion_group\tgroup_size\t"
+                 "is_primary_in_group\thomoeolog_call\n")
+        for order, r in enumerate(regs, start=1):
+            lo.write(f"{order}\t{args.qtl_id}\t{r['rank']}\t{r['seqid']}\t{r['start']}\t"
+                     f"{r['end']}\t{r['n_tgt_genes']}\t{r['src_cov_pct']}\t{r['pct_id']}\t"
+                     f"{r['region_group']}\t{r['group_size']}\t{r['is_primary']}\t"
+                     f"{r['call']}\n")
 
     if not regs:
         open(args.out_full, "w").close()
@@ -75,27 +92,18 @@ def main():
             fo.write(seq[k:k + 60] + "\n")
 
     n_full = n_win = 0
-    with open(args.target_fasta) as fh, \
-         open(args.out_full, "w") as ff, open(args.out_window, "w") as fw:
+
+    # Stream the genome once, but BUFFER the wanted sequences and write them
+    # out afterwards in the sorted `regs` order (gene-priority first) rather
+    # than genome-file order - otherwise the FASTA order would silently
+    # ignore --gene-priority even though the .tsv respects it.
+    seqs = {}
+    with open(args.target_fasta) as fh:
         name, buf, keep = None, [], False
 
         def flush():
-            nonlocal n_full, n_win
-            if not keep or name not in wanted:
-                return
-            r = wanted[name]
-            seq = "".join(buf)
-            tag = (f"rank={r['rank']} qtl={args.qtl_id} "
-                   f"src_cov_pct={r['src_cov_pct']} pct_id={r['pct_id']} "
-                   f"call={r['call']}")
-            ff.write(f">{name} {tag} len={len(seq)}\n")
-            wrap(ff, seq)
-            n_full += 1
-            s2, e2 = max(r["start"], 0), min(r["end"], len(seq))
-            if e2 > s2:
-                fw.write(f">{name}:{s2+1}-{e2} {tag}\n")
-                wrap(fw, seq[s2:e2])
-                n_win += 1
+            if keep and name in wanted:
+                seqs[name] = "".join(buf)
 
         for line in fh:
             if line.startswith(">"):
@@ -106,6 +114,30 @@ def main():
             elif keep:
                 buf.append(line.strip())
         flush()
+
+    def wrap(fo, seq):
+        for k in range(0, len(seq), 60):
+            fo.write(seq[k:k + 60] + "\n")
+
+    with open(args.out_full, "w") as ff, open(args.out_window, "w") as fw:
+        for r in regs:
+            seq = seqs.get(r["seqid"])
+            if seq is None:
+                continue
+            primary_tag = "primary" if r['is_primary'] == "1" else "alt_copy"
+            tag = (f"rank={r['rank']} qtl={args.qtl_id} "
+                   f"n_genes={r['n_tgt_genes']} "
+                   f"src_cov_pct={r['src_cov_pct']} pct_id={r['pct_id']} "
+                   f"group={r['region_group']}/{r['group_size']}({primary_tag}) "
+                   f"call={r['call']}")
+            ff.write(f">{r['seqid']} {tag} len={len(seq)}\n")
+            wrap(ff, seq)
+            n_full += 1
+            s2, e2 = max(r["start"], 0), min(r["end"], len(seq))
+            if e2 > s2:
+                fw.write(f">{r['seqid']}:{s2+1}-{e2} {tag}\n")
+                wrap(fw, seq[s2:e2])
+                n_win += 1
 
     missing = set(wanted) - set()
     sys.stderr.write(f"[extract_selected_scaffolds] {args.qtl_id}: "

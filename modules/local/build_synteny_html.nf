@@ -8,7 +8,7 @@ process BUILD_SYNTENY_HTML {
         'biocontainers/python:3.10' }"
 
     input:
-    tuple val(meta), path(regions), path(links), path(genes), path(paf)
+    tuple val(meta), path(regions), path(links), path(genes), path(paf), path(coverage)
     path source_expr
     path target_expr
 
@@ -33,6 +33,7 @@ process BUILD_SYNTENY_HTML {
         --links ${links} \\
         --genes ${genes} \\
         --paf ${paf} \\
+        --coverage ${coverage} \\
         ${se_arg} \\
         ${te_arg} \\
         --out ${meta.id}.html \\

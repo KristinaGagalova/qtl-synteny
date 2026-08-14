@@ -45,6 +45,39 @@ TYPE_PREFIX = re.compile(
     r"^(?:gene|transcript|mRNA|CDS|protein|exon|rna|ncRNA):", re.IGNORECASE)
 
 
+def merge_len(intervals):
+    """Total bp covered by [start, end) intervals, overlap counted once."""
+    if not intervals:
+        return 0, []
+    iv = sorted(intervals)
+    merged = [list(iv[0])]
+    for s, e in iv[1:]:
+        if s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return sum(e - s for s, e in merged), merged
+
+
+def read_paf_src_intervals(path):
+    """target_seqid -> list of (query_start, query_end) blocks, from the same
+    PAF rank_dna_regions.py used - needed here to compute the two-way source
+    coverage split (scaffolds WITH vs WITHOUT protein evidence)."""
+    by_t = defaultdict(list)
+    if not path:
+        return by_t
+    with open(path) as fh:
+        for line in fh:
+            f = line.rstrip("\n").split("\t")
+            if len(f) < 12:
+                continue
+            try:
+                by_t[f[5]].append((int(f[2]), int(f[3])))
+            except ValueError:
+                continue
+    return by_t
+
+
 TX_SUFFIX = re.compile(r"\.\d+$")
 
 
@@ -114,11 +147,10 @@ def read_regions(path, qtl_id):
                 src_slice_len=int(g("src_slice_len")),
                 src_cov_bp=int(g("src_cov_bp")),
                 src_cov_pct=float(g("src_cov_pct")),
-                marginal_cov_bp=int(g("marginal_cov_bp")),
-                marginal_cov_pct=float(g("marginal_cov_pct")),
-                cum_src_cov_bp=int(g("cum_src_cov_bp")),
-                cum_src_cov_pct=float(g("cum_src_cov_pct")),
                 tgt_cov_bp=int(g("tgt_cov_bp")),
+                region_group=int(g("region_group", "0")),
+                group_size=int(g("group_size", "1")),
+                provisional_group_best=int(g("provisional_group_best", "1")),
                 union_src_cov_bp=int(g("union_src_cov_bp")),
                 union_src_cov_pct=float(g("union_src_cov_pct")),
                 raw=f, hdr=hdr))
@@ -195,6 +227,9 @@ def main():
     ap.add_argument("--out-links", required=True)
     ap.add_argument("--out-genes", required=True)
     ap.add_argument("--out-regions", required=True)
+    ap.add_argument("--out-coverage", required=True)
+    ap.add_argument("--paf", help="source QTL slice vs whole target (for "
+                    "the with/without-gene-evidence coverage split)")
     ap.add_argument("--miniprot-min-ident", type=float, default=0.5)
     ap.add_argument("--homoeolog-min-frac", type=float, default=0.6,
                     help="fraction of a scaffold's RBH partners that must sit "
@@ -427,13 +462,57 @@ def main():
             out.write(f"{args.qtl_id}\ttarget\t{gid}\t{tid}\t{seqid}\t{s}\t{e}\t"
                       f"{strand}\t{rank}\n")
 
+    # ---- primary-in-group, using PROTEIN evidence (not DNA coverage) -----
+    # rank_dna_regions.py already grouped scaffolds whose covered source
+    # interval overlaps substantially (possible genome copies). Which one is
+    # the true match is decided HERE, now that gene evidence exists: the
+    # member of each group with the most combined RBH + miniprot support
+    # wins. Ties fall back to the DNA-coverage provisional flag.
+    def evidence_count(seqid):
+        c = per_region[seqid]
+        return c["rbh"] + c["miniprot"]
+
+    by_group = defaultdict(list)
+    for r in regs:
+        by_group[r["region_group"]].append(r)
+    is_primary = {}
+    for g, members in by_group.items():
+        members.sort(key=lambda r: (-evidence_count(r["tgt_seqid"]),
+                                    -r["provisional_group_best"],
+                                    -r["src_cov_bp"]))
+        for k, r in enumerate(members):
+            is_primary[r["tgt_seqid"]] = (k == 0)
+
+    # ---- coverage of the source split by gene evidence (two "logos") ------
+    # Union coverage from ALL DNA hits (not just kept/displayed regions),
+    # split into scaffolds that carry >=1 RBH or miniprot link vs those that
+    # do not. Independent of what --top-n or the viewer ends up showing.
+    paf_iv = read_paf_src_intervals(args.paf)
+    with_gene_iv, without_gene_iv = [], []
+    for seqid, blocks in paf_iv.items():
+        bucket = with_gene_iv if evidence_count(seqid) > 0 else without_gene_iv
+        bucket.extend(blocks)
+    cov_with_bp, _ = merge_len(with_gene_iv)
+    cov_without_bp, _ = merge_len(without_gene_iv)
+    cov_total_bp, _ = merge_len(with_gene_iv + without_gene_iv)
+    slice_len = regs[0]["src_slice_len"] if regs else 0
+    pct = lambda bp: 100.0 * bp / slice_len if slice_len else 0.0
+
+    with open(args.out_coverage, "w") as cov:
+        cov.write("qtl_id\tsrc_slice_len\tcov_with_genes_bp\tcov_with_genes_pct\t"
+                  "cov_without_genes_bp\tcov_without_genes_pct\t"
+                  "cov_total_bp\tcov_total_pct\n")
+        cov.write(f"{args.qtl_id}\t{slice_len}\t{cov_with_bp}\t{pct(cov_with_bp):.2f}\t"
+                  f"{cov_without_bp}\t{pct(cov_without_bp):.2f}\t"
+                  f"{cov_total_bp}\t{pct(cov_total_bp):.2f}\n")
+
     with open(args.out_regions, "w") as out:
         out.write("qtl_id\tsrc_chrom\tsrc_start\tsrc_end\tsrc_slice_len\trank\t"
                   "tgt_seqid\taligned_bp\tn_aln_blocks\tpct_id\tstrand\t"
-                  "src_cov_bp\tsrc_cov_pct\tmarginal_cov_bp\tmarginal_cov_pct\t"
-                  "cum_src_cov_bp\tcum_src_cov_pct\t"
+                  "src_cov_bp\tsrc_cov_pct\t"
                   "tgt_cov_bp\tunion_src_cov_bp\tunion_src_cov_pct\t"
                   "tgt_start\ttgt_end\ttgt_span\tn_tgt_genes\tn_miniprot\tn_rbh\t"
+                  "region_group\tgroup_size\tis_primary_in_group\tgroup_best_scaffold\t"
                   "consensus_src_chrom\tn_chrom_assigned\tn_chrom_rbh\tn_chrom_miniprot\t"
                   "frac_on_qtl_chrom\thomoeolog_call\n")
         for r in regs:
@@ -442,16 +521,18 @@ def main():
             hchrom, hn, h_nrbh, h_nmp, hfrac, hcall = homoeolog_call(r)
             if args.drop_homoeologs and hcall.startswith("HOMOEOLOG"):
                 continue
+            grp_members = by_group[r["region_group"]]
+            grp_best = next(m["tgt_seqid"] for m in grp_members if is_primary[m["tgt_seqid"]])
             out.write(f"{args.qtl_id}\t{args.qtl_chrom}\t{args.qtl_start}\t{args.qtl_end}\t"
                       f"{r['src_slice_len']}\t{r['rank']}\t{r['tgt_seqid']}\t"
                       f"{r['aligned_bp']}\t{r['n_aln_blocks']}\t{r['pct_id']:.1f}\t"
                       f"{r['strand']}\t{r['src_cov_bp']}\t{r['src_cov_pct']:.2f}\t"
-                      f"{r['marginal_cov_bp']}\t{r['marginal_cov_pct']:.2f}\t"
-                      f"{r['cum_src_cov_bp']}\t{r['cum_src_cov_pct']:.2f}\t"
                       f"{r['tgt_cov_bp']}\t{r['union_src_cov_bp']}\t"
                       f"{r['union_src_cov_pct']:.2f}\t"
                       f"{r['tgt_start']}\t{r['tgt_end']}\t{r['tgt_end']-r['tgt_start']}\t"
                       f"{ng}\t{c['miniprot']}\t{c['rbh']}\t"
+                      f"{r['region_group']}\t{r['group_size']}\t"
+                      f"{int(is_primary[r['tgt_seqid']])}\t{grp_best}\t"
                       f"{hchrom}\t{hn}\t{h_nrbh}\t{h_nmp}\t{hfrac:.2f}\t{hcall}\n")
 
     n_mp = sum(1 for l in links if l["track"] == "miniprot")
@@ -459,6 +540,18 @@ def main():
     calls = [homoeolog_call(r)[5] for r in regs]
     n_hom = sum(1 for c in calls if c.startswith("HOMOEOLOG"))
     n_conf = sum(1 for c in calls if "EVIDENCE_CONFLICT" in c)
+    n_groups_multi = sum(1 for g, m in by_group.items() if len(m) > 1)
+    if n_groups_multi:
+        sys.stderr.write(
+            f"[annotate_regions] {args.qtl_id}: {n_groups_multi} paralogy group(s) "
+            f"have more than one candidate scaffold (possible genome copies); "
+            f"the best match in each was chosen by RBH+miniprot evidence, others "
+            f"kept and flagged - see region_group/is_primary_in_group\n")
+    sys.stderr.write(
+        f"[annotate_regions] {args.qtl_id}: source coverage - "
+        f"{pct(cov_with_bp):.1f}% by gene-bearing scaffolds, "
+        f"{pct(cov_without_bp):.1f}% by gene-less scaffolds, "
+        f"{pct(cov_total_bp):.1f}% total\n")
     if n_hom:
         sys.stderr.write(
             f"[annotate_regions] {args.qtl_id}: {n_hom}/{len(regs)} regions look "

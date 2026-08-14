@@ -20,14 +20,20 @@ for line in open(qry):
 if not qn: sys.exit(0)
 # control QTL gets no hits, to exercise the empty-region path
 if '1B_control' in qry: sys.exit(0)
-scafs = [("cad_scaffold_008738",250000,7),("cad_scaffold_001122",250000,5),
-         ("cad_scaffold_039029",250000,4),("cad_scaffold_006409",250000,3),
-         ("cad_scaffold_019105",250000,2)]
-for si,(T,TL,nb) in enumerate(scafs):
+# Each scaffold covers a DIFFERENT stretch of the query, with a little
+# overlap, plus one deliberately redundant scaffold so the greedy selector
+# has something to reject.
+scafs = [("cad_scaffold_008738",250000,0.00,4,0.95),
+         ("cad_scaffold_001122",250000,0.20,3,0.94),
+         ("cad_scaffold_039029",250000,0.38,3,0.93),
+         ("cad_scaffold_006409",250000,0.55,2,0.92),
+         ("cad_scaffold_019105",250000,0.68,2,0.86),
+         ("cad_scaffold_091312",250000,0.02,3,0.90)]   # redundant with #1
+for si,(T,TL,start,nb,pid) in enumerate(scafs):
     for j in range(nb):
-        qs = int(qlen*(0.05+0.12*j)); qe = qs+int(qlen*0.04)
+        qs = int(qlen*(start+0.05*j)); qe = qs+int(qlen*0.045)
         ts = 15000+j*22000; te = ts+16000
         if qe>=qlen or te>=TL: break
         strand = '-' if (si+j)%4==0 else '+'
         aln = qe-qs
-        print(f"{qn}\t{qlen}\t{qs}\t{qe}\t{strand}\t{T}\t{TL}\t{ts}\t{te}\t{int(aln*0.94)}\t{aln}\t60")
+        print(f"{qn}\t{qlen}\t{qs}\t{qe}\t{strand}\t{T}\t{TL}\t{ts}\t{te}\t{int(aln*pid)}\t{aln}\t60")

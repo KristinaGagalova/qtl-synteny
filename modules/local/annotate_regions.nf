@@ -8,13 +8,14 @@ process ANNOTATE_REGIONS {
         'biocontainers/python:3.10' }"
 
     input:
-    tuple val(meta), path(regions), path(src_genes), path(tgt_genes), path(miniprot), path(rbh)
+    tuple val(meta), path(regions), path(paf), path(src_genes), path(tgt_genes), path(miniprot), path(rbh)
 
     output:
-    tuple val(meta), path("*.regions.tsv"), emit: regions
-    tuple val(meta), path("*.links.tsv")  , emit: links
-    tuple val(meta), path("*.genes.tsv")  , emit: genes
-    path "versions.yml"                   , emit: versions
+    tuple val(meta), path("*.regions.tsv")  , emit: regions
+    tuple val(meta), path("*.links.tsv")    , emit: links
+    tuple val(meta), path("*.genes.tsv")    , emit: genes
+    tuple val(meta), path("*.coverage.tsv") , emit: coverage
+    path "versions.yml"                     , emit: versions
 
     when:
     task.ext.when == null || task.ext.when
@@ -26,6 +27,7 @@ process ANNOTATE_REGIONS {
     """
     annotate_regions.py \\
         --regions ${regions} \\
+        --paf ${paf} \\
         --qtl-id '${meta.qtl_id}' \\
         --qtl-chrom '${meta.chrom}' \\
         --qtl-start ${meta.start} \\
@@ -37,6 +39,7 @@ process ANNOTATE_REGIONS {
         --out-links ${meta.id}.links.tsv \\
         --out-genes ${meta.id}.genes.tsv \\
         --out-regions ${meta.id}.regions.tsv \\
+        --out-coverage ${meta.id}.coverage.tsv \\
         ${args}
 
     cat <<-END_VERSIONS > versions.yml
@@ -47,6 +50,6 @@ process ANNOTATE_REGIONS {
 
     stub:
     """
-    touch ${meta.id}.regions.tsv ${meta.id}.links.tsv ${meta.id}.genes.tsv versions.yml
+    touch ${meta.id}.regions.tsv ${meta.id}.links.tsv ${meta.id}.genes.tsv ${meta.id}.coverage.tsv versions.yml
     """
 }
