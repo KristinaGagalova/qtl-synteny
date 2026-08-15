@@ -286,7 +286,8 @@ text{font:11px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-
       <label><input type="checkbox" id="cbMiniprot" checked> miniprot placements</label>
       <label><input type="checkbox" id="cbRbh" checked> reciprocal best hits</label>
       <label>Min % identity <input type="range" id="rgIdent" min="0" max="100" value="0" style="width:110px"><span id="lbIdent">0</span></label>
-      <button id="btnReset">Clear selection</button>
+      <button id="btnReset" class="btnClearSel">Clear selection</button>
+      <button class="btnDisplaySel">Display selected in alignment</button>
       <button id="btnClearLane" style="display:none">Show all regions</button>
       <span id="laneHint" class="sub" style="display:none">click a target label to isolate it</span>
     </div>
@@ -296,7 +297,7 @@ text{font:11px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-
       <span><i class="key" style="background:#b9c3d0"></i>DNA block (defines the region)</span>
       <span><i class="key" style="background:var(--mp)"></i>miniprot placement</span>
       <span><i class="key" style="background:var(--rbh)"></i>reciprocal best hit</span>
-      <span>gene arrows show strand &middot; click a gene to pin it &middot; click a target label to isolate that region</span>
+      <span>gene arrows show strand &middot; click a gene (here, in the expression table, or in annotation) to select it &middot; click a target label to isolate that region</span>
     </div>
     <div class="body"><svg id="syn"></svg></div>
   </div>
@@ -328,6 +329,8 @@ text{font:11px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-
     <h2>Expression table</h2>
     <div class="controls">
       <span id="tblNote" class="sub">click a gene above to filter &mdash; showing all</span>
+      <button class="btnClearSel">Clear selection</button>
+      <button class="btnDisplaySel">Display selected in alignment</button>
       <button id="btnCsv">Download CSV</button>
     </div>
     <div class="body"><div class="tblwrap"><table id="tbl"></table></div></div>
@@ -337,6 +340,8 @@ text{font:11px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-
     <h2>Gene annotation</h2>
     <div class="controls">
       <span id="annNote" class="sub"></span>
+      <button class="btnClearSel">Clear selection</button>
+      <button class="btnDisplaySel">Display selected in alignment</button>
       <button id="btnAnnCsv">Download CSV</button>
     </div>
     <div class="body"><div class="tblwrap"><table id="annTbl"></table></div></div>
@@ -363,6 +368,39 @@ function selectedLabel(){
   if (n === 1) return esc([...SEL][0]);
   return `${n} selected genes`;
 }
+let SHOW_SELECTED_ONLY = false;   // filter the idiogram + heatmap to selection
+function toggleDisplaySelected(){
+  SHOW_SELECTED_ONLY = !SHOW_SELECTED_ONLY;
+  redraw();
+}
+function clearSelection(){
+  // A full reset, not just an empty set: if Display was left on from a
+  // previous round, the very next gene picked would be instantly filtered
+  // to itself (SHOW_SELECTED_ONLY still true, SEL.size back to 1) -
+  // reproducing the exact "only lets me pick one" symptom this button is
+  // supposed to fix. Clearing always returns to a fresh, unfiltered state.
+  SEL = new Set();
+  SHOW_SELECTED_ONLY = false;
+  redraw();
+}
+function relevantGenes(){
+  // the current selection, plus every gene linked to any selected gene
+  // (source<->target via RBH/miniprot) - this is what "Display selected"
+  // filters down to, so a selected source gene brings its target match(es)
+  // into view and vice versa.
+  const rel = new Set(SEL);
+  DATA.links.forEach(l => {
+    if (SEL.has(l.src_gene)) rel.add(l.tgt_gene);
+    if (SEL.has(l.tgt_gene)) rel.add(l.src_gene);
+  });
+  return rel;
+}
+function updateDisplayButtons(){
+  document.querySelectorAll('.btnDisplaySel').forEach(b => {
+    b.classList.toggle('on', SHOW_SELECTED_ONLY);
+    b.textContent = SHOW_SELECTED_ONLY ? 'Showing selected only' : 'Display selected in alignment';
+  });
+}
 let SEL_LANE = null;       // selected target region rank (isolates one lane)
 const state = {aln:true, miniprot:true, rbh:true, minIdent:0,
                scale:'log', which:'both', linkedOnly:false, transpose:false};
@@ -380,10 +418,20 @@ const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'
 /* ---------------------------------------------------------------- synteny */
 function drawSynteny(){
   const svg = document.getElementById('syn');
-  const W = Math.max(1100, (DATA.regions.length ? 1100 : 900));
+
+  // "Display selected in alignment": when on and something is selected,
+  // only regions containing a relevant gene (selected, or linked to a
+  // selected gene) get a lane at all - genuinely filtered, not just dimmed.
+  const filtering = SHOW_SELECTED_ONLY && SEL.size > 0;
+  const rel = filtering ? relevantGenes() : null;
+  const visibleRegions = filtering
+    ? DATA.regions.filter(r => DATA.target_genes.some(g => g.seqid === r.tgt_seqid && rel.has(g.gene_id)))
+    : DATA.regions;
+
+  const W = Math.max(1100, (visibleRegions.length ? 1100 : 900));
   const laneH = 54, gap = 76, padL = 150, padR = 24, top = 44;
   const trackW = W - padL - padR;
-  const nLanes = 1 + DATA.regions.length;
+  const nLanes = 1 + visibleRegions.length;
   const H = top + nLanes * laneH + (nLanes - 1) * gap + 20;
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   svg.setAttribute('width', W); svg.setAttribute('height', H);
@@ -394,8 +442,8 @@ function drawSynteny(){
   const sx = p => padL + (Math.min(Math.max(p, src.start), src.end) - src.start) / srcLen * trackW;
   const srcY = top;
 
-  // lane scales for each target region
-  const lanes = DATA.regions.map((r, i) => {
+  // lane scales, one per VISIBLE region
+  const lanes = visibleRegions.map((r, i) => {
     const len = Math.max(r.tgt_end - r.tgt_start, 1);
     return {r, y: top + (i + 1) * (laneH + gap),
             x: p => padL + (Math.min(Math.max(p, r.tgt_start), r.tgt_end) - r.tgt_start) / len * trackW};
@@ -508,6 +556,7 @@ function drawSynteny(){
     ? new Set(DATA.links.filter(l => l.tgt_seqid === selRegion.tgt_seqid).map(l => l.src_gene))
     : null;
   for (const g of DATA.source_genes){
+    if (filtering && !rel.has(g.gene_id)) continue;
     const x1 = sx(g.start), x2 = Math.max(sx(g.end), sx(g.start) + 2.5);
     const dimGene = selRegion != null && !linkedSrcGenes.has(g.gene_id);
     s += geneArrow(g, x1, x2, srcY + 10, 'var(--src)', dimGene);
@@ -539,12 +588,15 @@ function drawSynteny(){
     for (const g of DATA.target_genes){
       if (g.seqid !== r.tgt_seqid) continue;
       if (g.end < r.tgt_start || g.start > r.tgt_end) continue;
+      if (filtering && !rel.has(g.gene_id)) continue;
       const x1 = lane.x(g.start), x2 = Math.max(lane.x(g.end), lane.x(g.start) + 2.5);
       s += geneArrow(g, x1, x2, lane.y + 8, 'var(--tgt)', isDim(r));
     }
   }
 
-  if (!DATA.regions.length)
+  if (!visibleRegions.length && filtering)
+    s += `<text x="${padL}" y="${top+80}" class="axis">No target region contains the selected gene(s) or their linked partners.</text>`;
+  else if (!visibleRegions.length)
     s += `<text x="${padL}" y="${top+80}" class="axis">No candidate target regions passed the thresholds for this QTL.</text>`;
 
   svg.innerHTML = s;
@@ -602,6 +654,10 @@ function heatGenes(){
   if (state.linkedOnly) gs = gs.filter(g => linked.has(g.gene_id));
   const lf = laneFilter();
   if (lf) gs = gs.filter(g => g.side === 'src' ? lf.srcIds.has(g.gene_id) : lf.tgtIds.has(g.gene_id));
+  if (SHOW_SELECTED_ONLY && SEL.size){
+    const rel = relevantGenes();
+    gs = gs.filter(g => rel.has(g.gene_id));
+  }
   return gs.filter(g => (g.side === 'src' ? DATA.expr_src : DATA.expr_tgt)[g.gene_id]);
 }
 
@@ -747,7 +803,10 @@ function tableRows(){
   const tgtGenes = lf ? DATA.target_genes.filter(g => lf.tgtIds.has(g.gene_id)) : DATA.target_genes;
   srcGenes.forEach(g => add(g, 'src', DATA.samples_src, DATA.expr_src));
   tgtGenes.forEach(g => add(g, 'tgt', DATA.samples_tgt, DATA.expr_tgt));
-  return SEL.size ? rows.filter(r => SEL.has(r.gene) ||
+  // Only hide non-selected rows once "Display selected" is on. Before that,
+  // selecting a gene must just highlight it - filtering on every click would
+  // hide the very rows you still need to click to build a multi-selection.
+  return (SHOW_SELECTED_ONLY && SEL.size) ? rows.filter(r => SEL.has(r.gene) ||
       DATA.links.some(l => (SEL.has(l.src_gene) && l.tgt_gene===r.gene) ||
                            (SEL.has(l.tgt_gene) && l.src_gene===r.gene))) : rows;
 }
@@ -791,10 +850,13 @@ function drawTable(){
   }));
   const noteParts = [];
   if (SEL_LANE != null) noteParts.push(`isolated to region #${SEL_LANE}`);
-  if (SEL.size) noteParts.push(`filtered to ${selectedLabel()} and linked partners`);
+  if (SHOW_SELECTED_ONLY && SEL.size)
+    noteParts.push(`filtered to ${selectedLabel()} and linked partners`);
+  else if (SEL.size)
+    noteParts.push(`${SEL.size === 1 ? selectedLabel() + ' selected' : selectedLabel()} — click "Display selected" to filter`);
   document.getElementById('tblNote').textContent = noteParts.length
     ? `${noteParts.join(', ')} (${rows.length} rows)`
-    : `click gene(s) above to filter — showing all ${rows.length} rows`;
+    : `click gene(s) to select — showing all ${rows.length} rows`;
 }
 
 function annotationRows(){
@@ -812,7 +874,8 @@ function annotationRows(){
   };
   srcGenes.forEach(g => add(g, 'src'));
   tgtGenes.forEach(g => add(g, 'tgt'));
-  if (SEL.size) rows = rows.filter(r => SEL.has(r.gene) ||
+  // Same rule as tableRows(): only filter once Display is explicitly on.
+  if (SHOW_SELECTED_ONLY && SEL.size) rows = rows.filter(r => SEL.has(r.gene) ||
       DATA.links.some(l => (SEL.has(l.src_gene) && l.tgt_gene===r.gene) ||
                            (SEL.has(l.tgt_gene) && l.src_gene===r.gene)));
   return {ann, rows};
@@ -844,7 +907,10 @@ function drawAnnotationTable(){
 
   const noteParts = [];
   if (SEL_LANE != null) noteParts.push(`isolated to region #${SEL_LANE}`);
-  if (SEL.size) noteParts.push(`filtered to ${selectedLabel()} and linked partners`);
+  if (SHOW_SELECTED_ONLY && SEL.size)
+    noteParts.push(`filtered to ${selectedLabel()} and linked partners`);
+  else if (SEL.size)
+    noteParts.push(`${SEL.size === 1 ? selectedLabel() + ' selected' : selectedLabel()} — click "Display selected" to filter`);
   document.getElementById('annNote').textContent = noteParts.length
     ? `${noteParts.join(', ')} (${rows.length} rows)`
     : `${rows.length} annotated gene(s) in view`;
@@ -902,7 +968,10 @@ function downloadCsv(){
   a.click();
 }
 
-function redraw(){ drawSynteny(); drawHeat(); drawTable(); drawAnnotationTable(); drawRegions(); }
+function redraw(){
+  drawSynteny(); drawHeat(); drawTable(); drawAnnotationTable(); drawRegions();
+  updateDisplayButtons();
+}
 
 document.getElementById('cbAln').onchange = e => { state.aln = e.target.checked; drawSynteny(); };
 document.getElementById('cbMiniprot').onchange = e => { state.miniprot = e.target.checked; drawSynteny(); };
@@ -916,7 +985,8 @@ document.getElementById('selScale').onchange = e => { state.scale = e.target.val
 document.getElementById('selWhich').onchange = e => { state.which = e.target.value; drawHeat(); };
 document.getElementById('cbLinkedOnly').onchange = e => { state.linkedOnly = e.target.checked; drawHeat(); };
 document.getElementById('cbTranspose').onchange = e => { state.transpose = e.target.checked; drawHeat(); };
-document.getElementById('btnReset').onclick = () => { SEL = new Set(); redraw(); };
+document.querySelectorAll('.btnClearSel').forEach(b => b.onclick = clearSelection);
+document.querySelectorAll('.btnDisplaySel').forEach(b => b.onclick = toggleDisplaySelected);
 document.getElementById('btnClearLane').onclick = () => { SEL_LANE = null; redraw(); };
 document.getElementById('btnCsv').onclick = downloadCsv;
 document.getElementById('btnAnnCsv').onclick = downloadAnnotationCsv;
