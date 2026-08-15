@@ -40,6 +40,8 @@ workflow SYNTENY_VIEWS {
     ch_rbh
     ch_source_expr
     ch_target_expr
+    ch_source_ann
+    ch_target_ann
 
     main:
     ch_versions = Channel.empty()
@@ -85,7 +87,7 @@ workflow SYNTENY_VIEWS {
         .join(MINIMAP2_REGION.out.paf)
         .join(ANNOTATE_REGIONS.out.coverage)
 
-    BUILD_SYNTENY_HTML(ch_html_in, ch_source_expr, ch_target_expr)
+    BUILD_SYNTENY_HTML(ch_html_in, ch_source_expr, ch_target_expr, ch_source_ann, ch_target_ann)
     ch_versions = ch_versions.mix(BUILD_SYNTENY_HTML.out.versions.first())
 
     // FASTA of the selected target sequences, for downstream work

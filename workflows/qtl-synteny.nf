@@ -38,6 +38,10 @@ workflow QTL_SYNTENY_FLOW {
         ? Channel.value(file(params.source_expression, checkIfExists: true)) : Channel.value(no_file)
     ch_target_expr = params.target_expression
         ? Channel.value(file(params.target_expression, checkIfExists: true)) : Channel.value(no_file)
+    ch_source_ann = params.source_annotation
+        ? Channel.value(file(params.source_annotation, checkIfExists: true)) : Channel.value(no_file)
+    ch_target_ann = params.target_annotation
+        ? Channel.value(file(params.target_annotation, checkIfExists: true)) : Channel.value(no_file)
 
     PREPARE_EVIDENCE(ch_source_gff, ch_target_gff, ch_source_pep, ch_target_pep, ch_target_fa)
     ch_versions = ch_versions.mix(PREPARE_EVIDENCE.out.versions)
@@ -52,7 +56,9 @@ workflow QTL_SYNTENY_FLOW {
         PREPARE_EVIDENCE.out.miniprot,
         PREPARE_EVIDENCE.out.rbh,
         ch_source_expr,
-        ch_target_expr
+        ch_target_expr,
+        ch_source_ann,
+        ch_target_ann
     )
     ch_versions = ch_versions.mix(SYNTENY_VIEWS.out.versions)
 

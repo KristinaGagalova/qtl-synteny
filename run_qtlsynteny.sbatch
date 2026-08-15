@@ -33,4 +33,6 @@ nextflow run . \
     --target_name       Cadenza \
     --outdir            ./results \
     -profile pawsey_setonix,singularity \
+    --source_annotation Annotations-final-norin.tsv \
+    --target_annotation Annotations-final-cadenza.tsv \
     -resume

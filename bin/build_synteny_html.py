@@ -126,6 +126,53 @@ def match_expression(expr, genes, label):
     return out
 
 
+def read_annotation(path):
+    """Generic gene-annotation TSV: first column is the gene id, every other
+    column is free-form and passed through as-is, however many there are.
+
+    Returns (columns, {gene_id: [values]}). No assumption about what the
+    extra columns mean - whatever the header says is what gets displayed.
+    """
+    if not path or not os.path.exists(path):
+        return [], {}
+    with open(path) as fh:
+        hdr = fh.readline().rstrip("\n").split("\t")
+        columns = hdr[1:]
+        data = {}
+        for line in fh:
+            if not line.strip():
+                continue
+            f = line.rstrip("\n").split("\t")
+            vals = f[1:len(columns) + 1]
+            while len(vals) < len(columns):
+                vals.append("")
+            data[f[0]] = vals
+    return columns, data
+
+
+def match_annotation(columns, table, genes, label):
+    """Same tolerant join as match_expression: exact id, then normalised."""
+    if not table:
+        return {}
+    index = {}
+    for k, v in table.items():
+        index.setdefault(k, v)
+        index.setdefault(norm_id(k), v)
+
+    out, n_hit = {}, 0
+    for g in genes:
+        gid = g["gene_id"]
+        hit = index.get(gid) or index.get(norm_id(gid))
+        if hit is not None:
+            out[gid] = hit
+            n_hit += 1
+
+    sys.stderr.write(f"[build_synteny_html] annotation {label}: "
+                     f"{n_hit}/{len(genes)} genes matched "
+                     f"({len(table)} rows, {len(columns)} columns)\n")
+    return out
+
+
 def _unoffset(name):
     """`seqid:start-end` (1-based, from extract_region_fasta.py) -> (seqid, offset).
 
@@ -284,6 +331,15 @@ text{font:11px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-
       <button id="btnCsv">Download CSV</button>
     </div>
     <div class="body"><div class="tblwrap"><table id="tbl"></table></div></div>
+  </div>
+
+  <div class="panel" id="annPanel" style="display:none">
+    <h2>Gene annotation</h2>
+    <div class="controls">
+      <span id="annNote" class="sub"></span>
+      <button id="btnAnnCsv">Download CSV</button>
+    </div>
+    <div class="body"><div class="tblwrap"><table id="annTbl"></table></div></div>
   </div>
 
   <div class="panel">
@@ -731,6 +787,78 @@ function drawTable(){
     : `click a gene above to filter — showing all ${rows.length} rows`;
 }
 
+function annotationRows(){
+  const ann = DATA.annotation || {columns:[], src:{}, tgt:{}};
+  if (!ann.columns.length) return {ann, rows:[]};
+  const lf = laneFilter();
+  const srcGenes = lf ? DATA.source_genes.filter(g => lf.srcIds.has(g.gene_id)) : DATA.source_genes;
+  const tgtGenes = lf ? DATA.target_genes.filter(g => lf.tgtIds.has(g.gene_id)) : DATA.target_genes;
+  let rows = [];
+  const add = (g, side) => {
+    const vals = (side === 'src' ? ann.src : ann.tgt)[g.gene_id];
+    if (!vals) return;  // only rows with at least one matched annotation
+    rows.push({gene: g.gene_id, side, seqid: g.seqid, vals,
+              cols: side === 'src' ? ann.cols_src : ann.cols_tgt});
+  };
+  srcGenes.forEach(g => add(g, 'src'));
+  tgtGenes.forEach(g => add(g, 'tgt'));
+  if (SEL) rows = rows.filter(r => r.gene === SEL ||
+      DATA.links.some(l => (l.src_gene===SEL && l.tgt_gene===r.gene) ||
+                           (l.tgt_gene===SEL && l.src_gene===r.gene)));
+  return {ann, rows};
+}
+
+function drawAnnotationTable(){
+  const panel = document.getElementById('annPanel');
+  const {ann, rows} = annotationRows();
+  if (!ann.columns.length){ panel.style.display = 'none'; return; }
+  panel.style.display = '';
+
+  const cols = ['gene', 'side', 'seqid', ...ann.columns];
+  let h = '<thead><tr>' + cols.map(c => `<th>${esc(c)}</th>`).join('') + '</tr></thead><tbody>';
+  for (const r of rows){
+    h += `<tr class="${r.gene===SEL?'sel':''}" data-gene="${esc(r.gene)}">`
+       + `<td>${esc(r.gene)}</td><td>${r.side}</td><td>${esc(r.seqid)}</td>`;
+    for (const c of ann.columns){
+      const idx = r.cols.indexOf(c);
+      h += `<td>${idx >= 0 ? esc(r.vals[idx]) : ''}</td>`;
+    }
+    h += '</tr>';
+  }
+  h += '</tbody>';
+  const t = document.getElementById('annTbl');
+  t.innerHTML = h;
+  t.querySelectorAll('tr[data-gene]').forEach(tr => tr.addEventListener('click', () => {
+    SEL = (SEL === tr.dataset.gene) ? null : tr.dataset.gene; redraw();
+  }));
+
+  const noteParts = [];
+  if (SEL_LANE != null) noteParts.push(`isolated to region #${SEL_LANE}`);
+  if (SEL) noteParts.push(`filtered to ${esc(SEL)} and its linked partners`);
+  document.getElementById('annNote').textContent = noteParts.length
+    ? `${noteParts.join(', ')} (${rows.length} rows)`
+    : `${rows.length} annotated gene(s) in view`;
+}
+
+function downloadAnnotationCsv(){
+  const {ann, rows} = annotationRows();
+  const cols = ['gene', 'side', 'seqid', ...ann.columns];
+  const lines = [cols.join(',')];
+  for (const r of rows){
+    const vals = ann.columns.map(c => {
+      const idx = r.cols.indexOf(c);
+      const v = idx >= 0 ? r.vals[idx] : '';
+      return '"' + String(v).replace(/"/g, '""') + '"';
+    });
+    lines.push([r.gene, r.side, r.seqid].concat(vals).join(','));
+  }
+  const b = new Blob([lines.join('\\n')], {type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(b);
+  a.download = DATA.qtl_id.replace(/[^A-Za-z0-9._-]/g,'_') + '_annotation.csv';
+  a.click();
+}
+
 function drawRegions(){
   const t = document.getElementById('regTbl');
   if (!DATA.regions.length){ t.innerHTML = '<tbody><tr><td class="empty">none</td></tr></tbody>'; return; }
@@ -764,7 +892,7 @@ function downloadCsv(){
   a.click();
 }
 
-function redraw(){ drawSynteny(); drawHeat(); drawTable(); drawRegions(); }
+function redraw(){ drawSynteny(); drawHeat(); drawTable(); drawAnnotationTable(); drawRegions(); }
 
 document.getElementById('cbAln').onchange = e => { state.aln = e.target.checked; drawSynteny(); };
 document.getElementById('cbMiniprot').onchange = e => { state.miniprot = e.target.checked; drawSynteny(); };
@@ -781,6 +909,7 @@ document.getElementById('cbTranspose').onchange = e => { state.transpose = e.tar
 document.getElementById('btnReset').onclick = () => { SEL = null; redraw(); };
 document.getElementById('btnClearLane').onclick = () => { SEL_LANE = null; redraw(); };
 document.getElementById('btnCsv').onclick = downloadCsv;
+document.getElementById('btnAnnCsv').onclick = downloadAnnotationCsv;
 
 function drawCoverageBadges(){
   const c = DATA.coverage || {};
@@ -800,7 +929,7 @@ function drawCoverageBadges(){
     </div>`;
 }
 
-drawCoverageBadges(); drawRegions(); redraw();
+drawCoverageBadges(); drawRegions(); drawAnnotationTable(); redraw();
 </script></body></html>
 """
 
@@ -820,6 +949,10 @@ def main():
     ap.add_argument("--paf", help="source QTL slice vs target")
     ap.add_argument("--source-expr")
     ap.add_argument("--target-expr")
+    ap.add_argument("--source-annotation",
+                    help="TSV: gene id in col 1, any number of annotation "
+                         "columns after, with a header row")
+    ap.add_argument("--target-annotation")
     ap.add_argument("--out", required=True)
     ap.add_argument("--flank", type=int, default=0)
     ap.add_argument("--show-empty-regions", action="store_true",
@@ -897,6 +1030,15 @@ def main():
     expr_src = match_expression(expr_src_all, src_genes, "source")
     expr_tgt = match_expression(expr_tgt_all, tgt_genes, "target")
 
+    cols_src, ann_src_all = read_annotation(args.source_annotation)
+    cols_tgt, ann_tgt_all = read_annotation(args.target_annotation)
+    ann_src = match_annotation(cols_src, ann_src_all, src_genes, "source")
+    ann_tgt = match_annotation(cols_tgt, ann_tgt_all, tgt_genes, "target")
+    # union of both sides' columns, source order first - so a table with
+    # different columns per side (or only one side supplied) still renders
+    # sensibly, with blanks where a column does not apply to that side
+    ann_columns = list(cols_src) + [c for c in cols_tgt if c not in cols_src]
+
     alignments = read_paf(args.paf, tgt_seqids)
 
     cov_rows = read_tsv(args.coverage) if args.coverage else []
@@ -919,7 +1061,9 @@ def main():
         samples_src=samples_src, samples_tgt=samples_tgt,
         expr_src=expr_src, expr_tgt=expr_tgt,
         alignments=alignments, coverage=coverage,
-        n_hidden_empty=n_hidden_empty, n_all_regions=len(all_regions))
+        n_hidden_empty=n_hidden_empty, n_all_regions=len(all_regions),
+        annotation=dict(columns=ann_columns, cols_src=cols_src, cols_tgt=cols_tgt,
+                        src=ann_src, tgt=ann_tgt))
 
     n_mp = sum(1 for l in link_out if l["track"] == "miniprot")
     n_rb = sum(1 for l in link_out if l["track"] == "rbh")

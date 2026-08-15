@@ -11,6 +11,8 @@ process BUILD_SYNTENY_HTML {
     tuple val(meta), path(regions), path(links), path(genes), path(paf), path(coverage)
     path source_expr
     path target_expr
+    path source_annotation
+    path target_annotation
 
     output:
     tuple val(meta), path("*.html"), emit: html
@@ -23,6 +25,8 @@ process BUILD_SYNTENY_HTML {
     def args   = task.ext.args ?: ''
     def se_arg = source_expr.name == 'NO_FILE' ? '' : "--source-expr ${source_expr}"
     def te_arg = target_expr.name == 'NO_FILE' ? '' : "--target-expr ${target_expr}"
+    def sa_arg = source_annotation.name == 'NO_FILE' ? '' : "--source-annotation ${source_annotation}"
+    def ta_arg = target_annotation.name == 'NO_FILE' ? '' : "--target-annotation ${target_annotation}"
     """
     build_synteny_html.py \\
         --qtl-id '${meta.qtl_id}' \\
@@ -36,6 +40,8 @@ process BUILD_SYNTENY_HTML {
         --coverage ${coverage} \\
         ${se_arg} \\
         ${te_arg} \\
+        ${sa_arg} \\
+        ${ta_arg} \\
         --out ${meta.id}.html \\
         ${args}
 
