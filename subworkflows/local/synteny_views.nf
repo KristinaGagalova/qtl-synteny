@@ -26,6 +26,7 @@ include { ANNOTATE_REGIONS      } from '../../modules/local/annotate_regions'
 include { BUILD_SYNTENY_HTML    } from '../../modules/local/build_synteny_html'
 include { BUILD_INDEX_HTML      } from '../../modules/local/build_index_html'
 include { EXTRACT_SELECTED_SCAFFOLDS } from '../../modules/local/extract_selected_scaffolds'
+include { FINAL_GENE_TABLE           } from '../../modules/local/final_gene_table'
 
 workflow SYNTENY_VIEWS {
 
@@ -90,6 +91,15 @@ workflow SYNTENY_VIEWS {
     BUILD_SYNTENY_HTML(ch_html_in, ch_source_expr, ch_target_expr, ch_source_ann, ch_target_ann)
     ch_versions = ch_versions.mix(BUILD_SYNTENY_HTML.out.versions.first())
 
+    // Final flat gene table: every source AND target gene, one row each,
+    // with RBH/remapping (source), homoeolog call (target), expression
+    // (both) and whatever annotation columns were supplied.
+    ch_final_in = ANNOTATE_REGIONS.out.genes
+        .join(ANNOTATE_REGIONS.out.links)
+        .join(ANNOTATE_REGIONS.out.regions)
+    FINAL_GENE_TABLE(ch_final_in, ch_source_expr, ch_target_expr, ch_source_ann, ch_target_ann)
+    ch_versions = ch_versions.mix(FINAL_GENE_TABLE.out.versions.first())
+
     // FASTA of the selected target sequences, for downstream work
     EXTRACT_SELECTED_SCAFFOLDS(ANNOTATE_REGIONS.out.regions, ch_target_fa)
     ch_versions = ch_versions.mix(EXTRACT_SELECTED_SCAFFOLDS.out.versions.first())
@@ -102,6 +112,12 @@ workflow SYNTENY_VIEWS {
     )
     ch_versions = ch_versions.mix(BUILD_INDEX_HTML.out.versions)
 
+    // one combined table across every QTL, header written once
+    ch_all_gene_table = FINAL_GENE_TABLE.out.table
+        .map { meta, f -> f }
+        .collectFile(name: 'all_qtl_gene_table.tsv', keepHeader: true, skip: 1,
+                     storeDir: "${params.outdir}/gene_table")
+
     emit:
     regions  = ANNOTATE_REGIONS.out.regions
     links    = ANNOTATE_REGIONS.out.links
@@ -109,5 +125,7 @@ workflow SYNTENY_VIEWS {
     scaffolds = EXTRACT_SELECTED_SCAFFOLDS.out.full
     windows   = EXTRACT_SELECTED_SCAFFOLDS.out.windows
     index    = BUILD_INDEX_HTML.out.html
+    gene_table     = FINAL_GENE_TABLE.out.table
+    all_gene_table = ch_all_gene_table
     versions = ch_versions
 }

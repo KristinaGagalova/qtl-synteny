@@ -352,7 +352,17 @@ text{font:11px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-
 <script>
 const DATA = __DATA__;
 const tip = document.getElementById('tip');
-let SEL = null;            // selected gene id
+let SEL = new Set();       // selected gene ids (multi-select)
+function toggleGene(id){
+  if (SEL.has(id)) SEL.delete(id); else SEL.add(id);
+  redraw();
+}
+function selectedLabel(){
+  const n = SEL.size;
+  if (n === 0) return '';
+  if (n === 1) return esc([...SEL][0]);
+  return `${n} selected genes`;
+}
 let SEL_LANE = null;       // selected target region rank (isolates one lane)
 const state = {aln:true, miniprot:true, rbh:true, minIdent:0,
                scale:'log', which:'both', linkedOnly:false, transpose:false};
@@ -439,7 +449,7 @@ function drawSynteny(){
         const yA = srcY + 26, yB = lane.y + 8;
         const my = (yA + yB)/2;
         const dim = isDim(lane.r);
-        const isSel = !dim && SEL && (l.src_gene === SEL || l.tgt_gene === SEL);
+        const isSel = !dim && (SEL.has(l.src_gene) || SEL.has(l.tgt_gene));
         const isRbh = l.track === 'rbh';
         const col = dim ? '#c7ccd3' : (isSel ? 'var(--sel)' : (isRbh ? 'var(--rbh)' : 'var(--mp)'));
         const w = isSel ? 2.2 : (isRbh ? 1.6 : 1.0);
@@ -455,7 +465,7 @@ function drawSynteny(){
 
   function geneArrow(g, x1, x2, y, fill, dim){
     const h = 11, tipw = Math.min(6, Math.max(2, x2 - x1));
-    const sel = !dim && SEL === g.gene_id;
+    const sel = !dim && SEL.has(g.gene_id);
     const f = dim ? '#c7ccd3' : (sel ? 'var(--sel)' : fill);
     let d;
     if (g.strand === '-')
@@ -545,7 +555,7 @@ function drawSynteny(){
   svg.querySelectorAll('[data-gene]').forEach(el => {
     el.addEventListener('click', (e) => {
       e.stopPropagation();
-      SEL = (SEL === el.dataset.gene) ? null : el.dataset.gene; redraw();
+      toggleGene(el.dataset.gene);
     });
   });
   svg.querySelectorAll('.laneLabel').forEach(el => {
@@ -660,7 +670,7 @@ function drawHeat(){
     const isGene = !T;
     const g = isGene ? genes[c] : null;
     const label = isGene ? g.gene_id : samples[c];
-    const sel = isGene && SEL === g.gene_id;
+    const sel = isGene && SEL.has(g.gene_id);
     const col = isGene ? (sel ? 'var(--sel)' : (g.side==='src'?'var(--src)':'var(--tgt)')) : 'var(--muted)';
     s += `<text class="axis" transform="translate(${x+cw/2},${padT-6}) rotate(-58)"
            text-anchor="start" fill="${col}" font-weight="${sel?700:400}">${esc(label)}</text>`;
@@ -671,7 +681,7 @@ function drawHeat(){
     const isGene = T;
     const g = isGene ? genes[r] : null;
     const label = isGene ? g.gene_id : samples[r];
-    const sel = isGene && SEL === g.gene_id;
+    const sel = isGene && SEL.has(g.gene_id);
     const col = isGene ? (sel ? 'var(--sel)' : (g.side==='src'?'var(--src)':'var(--tgt)')) : 'var(--muted)';
     s += `<text class="axis" x="${padL-7}" y="${y}" text-anchor="end" fill="${col}"
            font-weight="${sel?700:400}">${esc(label)}</text>`;
@@ -686,14 +696,14 @@ function drawHeat(){
              data-tip="<b>${esc(g.gene_id)}</b><br>${esc(sm)}: ${v==null?'NA':v.toFixed(3)}"></rect>`;
     }
   }
-  // selection outline
-  const selIdx = genes.findIndex(g => g.gene_id === SEL);
-  if (selIdx >= 0){
-    if (T) s += `<rect x="${padL-1}" y="${padT + selIdx*ch - 1}" width="${nCol*cw+1}" height="${ch+1}"
+  // selection outlines (one per selected gene present in this view)
+  genes.forEach((g, idx) => {
+    if (!SEL.has(g.gene_id)) return;
+    if (T) s += `<rect x="${padL-1}" y="${padT + idx*ch - 1}" width="${nCol*cw+1}" height="${ch+1}"
                   fill="none" stroke="var(--sel)" stroke-width="1.6"></rect>`;
-    else   s += `<rect x="${padL + selIdx*cw - 1}" y="${padT-2}" width="${cw+1}" height="${nRow*ch+3}"
+    else   s += `<rect x="${padL + idx*cw - 1}" y="${padT-2}" width="${cw+1}" height="${nRow*ch+3}"
                   fill="none" stroke="var(--sel)" stroke-width="1.6"></rect>`;
-  }
+  });
   // colour key
   const kx = padL + nCol*cw + 22, kh = Math.min(120, nRow*ch);
   for (let i = 0; i < 40; i++){
@@ -709,7 +719,7 @@ function drawHeat(){
     el.addEventListener('mouseleave', hideTip);
   });
   svg.querySelectorAll('[data-gene]').forEach(el => {
-    el.addEventListener('click', () => { SEL = (SEL === el.dataset.gene) ? null : el.dataset.gene; redraw(); });
+    el.addEventListener('click', () => toggleGene(el.dataset.gene));
   });
 }
 
@@ -737,9 +747,9 @@ function tableRows(){
   const tgtGenes = lf ? DATA.target_genes.filter(g => lf.tgtIds.has(g.gene_id)) : DATA.target_genes;
   srcGenes.forEach(g => add(g, 'src', DATA.samples_src, DATA.expr_src));
   tgtGenes.forEach(g => add(g, 'tgt', DATA.samples_tgt, DATA.expr_tgt));
-  return SEL ? rows.filter(r => r.gene === SEL ||
-      DATA.links.some(l => (l.src_gene===SEL && l.tgt_gene===r.gene) ||
-                           (l.tgt_gene===SEL && l.src_gene===r.gene))) : rows;
+  return SEL.size ? rows.filter(r => SEL.has(r.gene) ||
+      DATA.links.some(l => (SEL.has(l.src_gene) && l.tgt_gene===r.gene) ||
+                           (SEL.has(l.tgt_gene) && l.src_gene===r.gene))) : rows;
 }
 
 function drawTable(){
@@ -758,7 +768,7 @@ function drawTable(){
     });
   }
   for (const r of rows){
-    h += `<tr class="${r.gene===SEL?'sel':''}" data-gene="${esc(r.gene)}">`
+    h += `<tr class="${SEL.has(r.gene)?'sel':''}" data-gene="${esc(r.gene)}">`
        + `<td>${esc(r.gene)}</td><td>${r.side}</td><td>${esc(r.seqid)}</td>`
        + `<td class="num">${r.start.toLocaleString()}</td><td class="num">${r.end.toLocaleString()}</td>`
        + `<td>${r.strand}</td><td>${esc(r.partner)}</td><td>${esc(r.evidence)}</td>`;
@@ -777,14 +787,14 @@ function drawTable(){
     drawTable();
   }));
   t.querySelectorAll('tr[data-gene]').forEach(tr => tr.addEventListener('click', ()=>{
-    SEL = (SEL === tr.dataset.gene) ? null : tr.dataset.gene; redraw();
+    toggleGene(tr.dataset.gene);
   }));
   const noteParts = [];
   if (SEL_LANE != null) noteParts.push(`isolated to region #${SEL_LANE}`);
-  if (SEL) noteParts.push(`filtered to ${esc(SEL)} and its linked partners`);
+  if (SEL.size) noteParts.push(`filtered to ${selectedLabel()} and linked partners`);
   document.getElementById('tblNote').textContent = noteParts.length
     ? `${noteParts.join(', ')} (${rows.length} rows)`
-    : `click a gene above to filter — showing all ${rows.length} rows`;
+    : `click gene(s) above to filter — showing all ${rows.length} rows`;
 }
 
 function annotationRows(){
@@ -802,9 +812,9 @@ function annotationRows(){
   };
   srcGenes.forEach(g => add(g, 'src'));
   tgtGenes.forEach(g => add(g, 'tgt'));
-  if (SEL) rows = rows.filter(r => r.gene === SEL ||
-      DATA.links.some(l => (l.src_gene===SEL && l.tgt_gene===r.gene) ||
-                           (l.tgt_gene===SEL && l.src_gene===r.gene)));
+  if (SEL.size) rows = rows.filter(r => SEL.has(r.gene) ||
+      DATA.links.some(l => (SEL.has(l.src_gene) && l.tgt_gene===r.gene) ||
+                           (SEL.has(l.tgt_gene) && l.src_gene===r.gene)));
   return {ann, rows};
 }
 
@@ -817,7 +827,7 @@ function drawAnnotationTable(){
   const cols = ['gene', 'side', 'seqid', ...ann.columns];
   let h = '<thead><tr>' + cols.map(c => `<th>${esc(c)}</th>`).join('') + '</tr></thead><tbody>';
   for (const r of rows){
-    h += `<tr class="${r.gene===SEL?'sel':''}" data-gene="${esc(r.gene)}">`
+    h += `<tr class="${SEL.has(r.gene)?'sel':''}" data-gene="${esc(r.gene)}">`
        + `<td>${esc(r.gene)}</td><td>${r.side}</td><td>${esc(r.seqid)}</td>`;
     for (const c of ann.columns){
       const idx = r.cols.indexOf(c);
@@ -829,12 +839,12 @@ function drawAnnotationTable(){
   const t = document.getElementById('annTbl');
   t.innerHTML = h;
   t.querySelectorAll('tr[data-gene]').forEach(tr => tr.addEventListener('click', () => {
-    SEL = (SEL === tr.dataset.gene) ? null : tr.dataset.gene; redraw();
+    toggleGene(tr.dataset.gene);
   }));
 
   const noteParts = [];
   if (SEL_LANE != null) noteParts.push(`isolated to region #${SEL_LANE}`);
-  if (SEL) noteParts.push(`filtered to ${esc(SEL)} and its linked partners`);
+  if (SEL.size) noteParts.push(`filtered to ${selectedLabel()} and linked partners`);
   document.getElementById('annNote').textContent = noteParts.length
     ? `${noteParts.join(', ')} (${rows.length} rows)`
     : `${rows.length} annotated gene(s) in view`;
@@ -906,7 +916,7 @@ document.getElementById('selScale').onchange = e => { state.scale = e.target.val
 document.getElementById('selWhich').onchange = e => { state.which = e.target.value; drawHeat(); };
 document.getElementById('cbLinkedOnly').onchange = e => { state.linkedOnly = e.target.checked; drawHeat(); };
 document.getElementById('cbTranspose').onchange = e => { state.transpose = e.target.checked; drawHeat(); };
-document.getElementById('btnReset').onclick = () => { SEL = null; redraw(); };
+document.getElementById('btnReset').onclick = () => { SEL = new Set(); redraw(); };
 document.getElementById('btnClearLane').onclick = () => { SEL_LANE = null; redraw(); };
 document.getElementById('btnCsv').onclick = downloadCsv;
 document.getElementById('btnAnnCsv').onclick = downloadAnnotationCsv;
@@ -935,6 +945,32 @@ drawCoverageBadges(); drawRegions(); drawAnnotationTable(); redraw();
 
 
 # --------------------------------------------------------------------------
+def region_passes(r, mode, min_gene_region_bp):
+    """Decide whether one target scaffold gets a lane / a row.
+
+    'evidence'    only scaffolds with >=1 RBH or miniprot hit (default)
+    'gene_length' the above, PLUS any scaffold that carries >=1 annotated
+                  gene and whose aligned length clears --min-gene-region-bp
+                  -- for real synteny that annotation or protein evidence
+                  missed (see README: "synteny without RBH or miniprot")
+    'all'         every scaffold that aligned at all, no filtering
+
+    Both build_synteny_html.py and final_gene_table.py MUST apply this
+    exact rule with the exact same arguments, or the HTML view and the
+    gene table list different genes again.
+    """
+    if mode == "all":
+        return True
+    has_evidence = (int(r.get("n_miniprot", 0) or 0) > 0
+                    or int(r.get("n_rbh", 0) or 0) > 0)
+    if mode == "evidence":
+        return has_evidence
+    if mode == "gene_length":
+        has_gene = int(r.get("n_tgt_genes", 0) or 0) > 0
+        aligned = int(r.get("aligned_bp", 0) or 0)
+        return has_evidence or (has_gene and aligned >= min_gene_region_bp)
+    return has_evidence
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -955,10 +991,16 @@ def main():
     ap.add_argument("--target-annotation")
     ap.add_argument("--out", required=True)
     ap.add_argument("--flank", type=int, default=0)
-    ap.add_argument("--show-empty-regions", action="store_true",
-                    help="also draw lanes for scaffolds with no RBH or "
-                         "miniprot evidence (default: hidden, since a "
-                         "gene-less scaffold gives nothing to inspect here)")
+    ap.add_argument("--region-display-mode", choices=["evidence", "gene_length", "all"],
+                    default="evidence",
+                    help="'evidence' (default): only scaffolds with >=1 RBH "
+                         "or miniprot hit. 'gene_length': also include "
+                         "scaffolds with an annotated gene whose aligned "
+                         "length clears --min-gene-region-bp, even with no "
+                         "protein evidence. 'all': no filtering.")
+    ap.add_argument("--min-gene-region-bp", type=int, default=5000,
+                    help="gene_length mode only: minimum aligned bp for a "
+                         "gene-bearing, evidence-less scaffold to be shown")
     args = ap.parse_args()
 
     regions = [r for r in read_tsv(args.regions) if r["qtl_id"] == args.qtl_id]
@@ -995,10 +1037,8 @@ def main():
     # but there is no protein-level signal to examine here), so it is hidden
     # by default. It still exists in --regions / the FASTA output upstream -
     # this filter only affects what gets drawn.
-    if args.show_empty_regions:
-        reg_out = all_regions
-    else:
-        reg_out = [r for r in all_regions if r["n_miniprot"] > 0 or r["n_rbh"] > 0]
+    reg_out = [r for r in all_regions
+              if region_passes(r, args.region_display_mode, args.min_gene_region_bp)]
     n_hidden_empty = len(all_regions) - len(reg_out)
     tgt_seqids = [r["tgt_seqid"] for r in reg_out]
 
