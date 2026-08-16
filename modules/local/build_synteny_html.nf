@@ -15,8 +15,9 @@ process BUILD_SYNTENY_HTML {
     path target_annotation
 
     output:
-    tuple val(meta), path("*.html"), emit: html
-    path "versions.yml"            , emit: versions
+    tuple val(meta), path("*.html")             , emit: html
+    tuple val(meta), path("*.match_report.txt") , emit: match_report
+    path "versions.yml"                         , emit: versions
 
     when:
     task.ext.when == null || task.ext.when
@@ -42,6 +43,7 @@ process BUILD_SYNTENY_HTML {
         ${te_arg} \\
         ${sa_arg} \\
         ${ta_arg} \\
+        --match-report ${meta.id}.match_report.txt \\
         --out ${meta.id}.html \\
         ${args}
 
@@ -53,6 +55,6 @@ process BUILD_SYNTENY_HTML {
 
     stub:
     """
-    touch ${meta.id}.html versions.yml
+    touch ${meta.id}.html ${meta.id}.match_report.txt versions.yml
     """
 }

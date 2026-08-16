@@ -112,6 +112,13 @@ workflow SYNTENY_VIEWS {
     )
     ch_versions = ch_versions.mix(BUILD_INDEX_HTML.out.versions)
 
+    // one combined match report across every QTL, for a single place to
+    // check id-matching problems without opening each QTL's file
+    ch_all_match_report = BUILD_SYNTENY_HTML.out.match_report
+        .map { meta, f -> f }
+        .collectFile(name: 'all_qtl_match_report.txt', sort: true,
+                     storeDir: "${params.outdir}/logs")
+
     // one combined table across every QTL, header written once
     ch_all_gene_table = FINAL_GENE_TABLE.out.table
         .map { meta, f -> f }
@@ -125,6 +132,8 @@ workflow SYNTENY_VIEWS {
     scaffolds = EXTRACT_SELECTED_SCAFFOLDS.out.full
     windows   = EXTRACT_SELECTED_SCAFFOLDS.out.windows
     index    = BUILD_INDEX_HTML.out.html
+    match_report      = BUILD_SYNTENY_HTML.out.match_report
+    all_match_report  = ch_all_match_report
     gene_table     = FINAL_GENE_TABLE.out.table
     all_gene_table = ch_all_gene_table
     versions = ch_versions

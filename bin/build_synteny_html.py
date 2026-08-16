@@ -87,15 +87,67 @@ def read_expression(path):
     return samples, data
 
 
-def match_expression(expr, genes, label):
-    """Join the counts table to the displayed genes.
+MATCH_LOG = []   # accumulated match diagnostics, written to --match-report
 
-    Annotations and counts tables disagree about IDs more often than not
-    (gene vs transcript accession, an Ensembl 'gene:' prefix, a trailing
-    '.1'), so try the obvious variants rather than silently rendering an
-    empty heatmap. Reports what matched so a mismatch is visible in the log.
+
+def report_match(kind, label, genes, table, matched, missed):
+    """One consistent diagnostic for every gene->table join.
+
+    Both the counts table and the annotation table are joined to the gene
+    set by identifier, and identifiers disagree between files far more often
+    than they agree (gene vs transcript accession, an Ensembl 'gene:'
+    prefix, a trailing '.N'). Silence here is the worst outcome, so every
+    join reports what matched, what did not, and enough example ids from
+    BOTH sides to tell an id-format problem apart from genuinely absent
+    genes.
     """
+    n, total = len(matched), len(genes)
+    pct = 100.0 * n / total if total else 0.0
+    head = f"[build_synteny_html] {kind} {label}: {n}/{total} genes matched ({pct:.1f}%)"
+    if table:
+        head += f", {len(table)} rows in file"
+    MATCH_LOG.append(head)
+    sys.stderr.write(head + "\n")
+
+    if not table:
+        msg = f"  no {kind} file supplied for {label} - all values will be NA"
+        MATCH_LOG.append(msg)
+        return
+
+    if n == 0 and total:
+        msg = (f"  WARNING: NOTHING matched. Example gene id from the GFF: "
+               f"{genes[0]['gene_id']!r}; example id in the {kind} file: "
+               f"{next(iter(table))!r}. These look like different id "
+               f"conventions - check the first column of your {kind} file.")
+        MATCH_LOG.append(msg)
+        sys.stderr.write(msg + "\n")
+    elif missed:
+        shown = ", ".join(repr(m) for m in missed[:10])
+        more = f" (+{len(missed)-10} more)" if len(missed) > 10 else ""
+        msg = (f"  {len(missed)} gene(s) from the GFF had no {kind} row, "
+               f"shown as NA: {shown}{more}")
+        MATCH_LOG.append(msg)
+        sys.stderr.write(msg + "\n")
+
+    # ids present in the user's file that never matched any displayed gene -
+    # usually just genes outside this QTL, but a very high number alongside
+    # a low match rate points at an id-format mismatch instead
+    gene_keys = set()
+    for g in genes:
+        gene_keys.add(g["gene_id"])
+        gene_keys.add(norm_id(g["gene_id"]))
+    unused = [k for k in table if k not in gene_keys and norm_id(k) not in gene_keys]
+    if unused and n < total:
+        msg = (f"  note: {len(unused)}/{len(table)} rows in the {kind} file "
+               f"matched no displayed gene (expected - most will be genes "
+               f"outside this QTL)")
+        MATCH_LOG.append(msg)
+
+
+def match_expression(expr, genes, label):
+    """Join the counts table to the displayed genes."""
     if not expr:
+        report_match("expression", label, genes, expr, {}, [g["gene_id"] for g in genes])
         return {}
 
     index = {}
@@ -114,15 +166,7 @@ def match_expression(expr, genes, label):
         else:
             misses.append(gid)
 
-    sys.stderr.write(f"[build_synteny_html] expression {label}: "
-                     f"{len(out)}/{len(genes)} genes matched "
-                     f"({len(expr)} rows in table)\n")
-    if misses and len(out) == 0 and genes:
-        sys.stderr.write(
-            f"[build_synteny_html] WARNING: no {label} gene matched the counts "
-            f"table. Example displayed gene id: {genes[0]['gene_id']!r}; "
-            f"example counts id: {next(iter(expr))!r}. Check that the counts "
-            f"table uses the same accessions as the GFF.\n")
+    report_match("expression", label, genes, expr, out, misses)
     return out
 
 
@@ -153,23 +197,27 @@ def read_annotation(path):
 def match_annotation(columns, table, genes, label):
     """Same tolerant join as match_expression: exact id, then normalised."""
     if not table:
+        report_match("annotation", label, genes, table, {},
+                     [g["gene_id"] for g in genes])
         return {}
     index = {}
     for k, v in table.items():
         index.setdefault(k, v)
         index.setdefault(norm_id(k), v)
 
-    out, n_hit = {}, 0
+    out, misses = {}, []
     for g in genes:
         gid = g["gene_id"]
         hit = index.get(gid) or index.get(norm_id(gid))
         if hit is not None:
             out[gid] = hit
-            n_hit += 1
+        else:
+            misses.append(gid)
 
-    sys.stderr.write(f"[build_synteny_html] annotation {label}: "
-                     f"{n_hit}/{len(genes)} genes matched "
-                     f"({len(table)} rows, {len(columns)} columns)\n")
+    report_match("annotation", label, genes, table, out, misses)
+    if columns:
+        MATCH_LOG.append(f"  {len(columns)} annotation column(s): "
+                         f"{', '.join(columns)}")
     return out
 
 
@@ -289,6 +337,8 @@ text{font:11px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-
       <button id="btnReset" class="btnClearSel">Clear selection</button>
       <button class="btnDisplaySel">Display selected in alignment</button>
       <button id="btnClearLane" style="display:none">Show all regions</button>
+      <button id="btnSynSvg">Download SVG</button>
+      <button id="btnSynCsv">Download regions CSV</button>
       <span id="laneHint" class="sub" style="display:none">click a target label to isolate it</span>
     </div>
     <div class="legend">
@@ -300,6 +350,17 @@ text{font:11px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-
       <span>gene arrows show strand &middot; click a gene (here, in the expression table, or in annotation) to select it &middot; click a target label to isolate that region</span>
     </div>
     <div class="body"><svg id="syn"></svg></div>
+  </div>
+
+  <div class="panel" id="annPanel" style="display:none">
+    <h2>Gene annotation</h2>
+    <div class="controls">
+      <span id="annNote" class="sub"></span>
+      <button class="btnClearSel">Clear selection</button>
+      <button class="btnDisplaySel">Display selected in alignment</button>
+      <button id="btnAnnCsv">Download CSV</button>
+    </div>
+    <div class="body"><div class="tblwrap"><table id="annTbl"></table></div></div>
   </div>
 
   <div class="panel">
@@ -334,17 +395,6 @@ text{font:11px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-
       <button id="btnCsv">Download CSV</button>
     </div>
     <div class="body"><div class="tblwrap"><table id="tbl"></table></div></div>
-  </div>
-
-  <div class="panel" id="annPanel" style="display:none">
-    <h2>Gene annotation</h2>
-    <div class="controls">
-      <span id="annNote" class="sub"></span>
-      <button class="btnClearSel">Clear selection</button>
-      <button class="btnDisplaySel">Display selected in alignment</button>
-      <button id="btnAnnCsv">Download CSV</button>
-    </div>
-    <div class="body"><div class="tblwrap"><table id="annTbl"></table></div></div>
   </div>
 
   <div class="panel">
@@ -658,7 +708,11 @@ function heatGenes(){
     const rel = relevantGenes();
     gs = gs.filter(g => rel.has(g.gene_id));
   }
-  return gs.filter(g => (g.side === 'src' ? DATA.expr_src : DATA.expr_tgt)[g.gene_id]);
+  // Genes with no expression row are KEPT - their cells render in the
+  // neutral "no data" colour. Dropping them here would make the heatmap's
+  // gene set disagree with the tables and the synteny panel, which is
+  // exactly the mismatch this pipeline keeps having to fix.
+  return gs;
 }
 
 function scaleVals(vals, mode){
@@ -790,13 +844,16 @@ function tableRows(){
   const rows = [];
   const add = (g, side, samples, expr) => {
     const v = expr[g.gene_id];
-    if (!v) return;
     const ls = side === 'src' ? (linked.get(g.gene_id) || []) : DATA.links.filter(l => l.tgt_gene === g.gene_id);
+    // Every gene gets a row even with no expression data - a row of nulls
+    // (rendered as NA), not a skipped one, so this table's gene count
+    // matches genes.tsv / the final gene table / the annotation panel.
     rows.push({gene:g.gene_id, side, seqid:g.seqid, start:g.start, end:g.end,
                strand:g.strand,
                partner: ls.map(l => (side==='src' ? l.tgt_gene : l.src_gene) || '(unannot)').join(','),
                evidence: [...new Set(ls.map(l => l.track))].join('+'),
-               vals:v, samples});
+               vals: v || samples.map(() => null), samples,
+               hasExpr: !!v});
   };
   const lf = laneFilter();
   const srcGenes = lf ? DATA.source_genes.filter(g => lf.srcIds.has(g.gene_id)) : DATA.source_genes;
@@ -833,7 +890,7 @@ function drawTable(){
        + `<td>${r.strand}</td><td>${esc(r.partner)}</td><td>${esc(r.evidence)}</td>`;
     for (let i = 0; i < sampleCols.length; i++){
       const v = r.vals[i];
-      h += `<td class="num">${v==null?'':v.toFixed(2)}</td>`;
+      h += `<td class="num">${v==null?'NA':v.toFixed(2)}</td>`;
     }
     h += '</tr>';
   }
@@ -867,10 +924,14 @@ function annotationRows(){
   const tgtGenes = lf ? DATA.target_genes.filter(g => lf.tgtIds.has(g.gene_id)) : DATA.target_genes;
   let rows = [];
   const add = (g, side) => {
+    const cols = side === 'src' ? ann.cols_src : ann.cols_tgt;
     const vals = (side === 'src' ? ann.src : ann.tgt)[g.gene_id];
-    if (!vals) return;  // only rows with at least one matched annotation
-    rows.push({gene: g.gene_id, side, seqid: g.seqid, vals,
-              cols: side === 'src' ? ann.cols_src : ann.cols_tgt});
+    // Every gene gets a row, even with no annotation match - an "NA" row,
+    // not a skipped one, so this table's gene count matches genes.tsv /
+    // the final gene table exactly, the same way the expression table
+    // already includes every gene regardless of expression data.
+    rows.push({gene: g.gene_id, side, seqid: g.seqid,
+              vals: vals || cols.map(() => 'NA'), cols});
   };
   srcGenes.forEach(g => add(g, 'src'));
   tgtGenes.forEach(g => add(g, 'tgt'));
@@ -960,11 +1021,57 @@ function downloadCsv(){
   const lines = [head.join(',')];
   for (const r of rows)
     lines.push([r.gene,r.side,r.seqid,r.start,r.end,r.strand,'"'+r.partner+'"',r.evidence]
-      .concat(sampleCols.map((_,i)=> r.vals[i]==null?'':r.vals[i])).join(','));
+      .concat(sampleCols.map((_,i)=> r.vals[i]==null?'NA':r.vals[i])).join(','));
   const b = new Blob([lines.join('\\n')], {type:'text/csv'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(b);
   a.download = DATA.qtl_id.replace(/[^A-Za-z0-9._-]/g,'_') + '_expression.csv';
+  a.click();
+}
+
+function downloadSyntenySvg(){
+  // Serialise the rendered SVG with the CSS variables resolved to literal
+  // colours, otherwise the file opens colourless outside this page.
+  const svg = document.getElementById('syn');
+  const vars = {'--src':'#2f6f9f','--tgt':'#3f8f6f','--rbh':'#c2571a',
+                '--mp':'#7a5bb5','--sel':'#d92b2b','--line':'#d8dce3',
+                '--muted':'#697386','--ink':'#1c2027'};
+  let inner = svg.innerHTML;
+  for (const [k,v] of Object.entries(vars))
+    inner = inner.split(`var(${k})`).join(v);
+  const out = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${svg.getAttribute('viewBox')}" `
+            + `width="${svg.getAttribute('width')}" height="${svg.getAttribute('height')}">`
+            + `<style>text{font:11px -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}`
+            + `.axis{fill:#697386;font-size:10px}</style>${inner}</svg>`;
+  const b = new Blob([out], {type:'image/svg+xml'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(b);
+  a.download = DATA.qtl_id.replace(/[^A-Za-z0-9._-]/g,'_') + '_synteny.svg';
+  a.click();
+}
+
+function downloadRegionsCsv(){
+  // exactly the regions currently drawn, in draw order
+  const filtering = SHOW_SELECTED_ONLY && SEL.size > 0;
+  const rel = filtering ? relevantGenes() : null;
+  const regs = filtering
+    ? DATA.regions.filter(r => DATA.target_genes.some(g => g.seqid === r.tgt_seqid && rel.has(g.gene_id)))
+    : DATA.regions;
+  const cols = ['rank','tgt_seqid','src_cov_bp','src_cov_pct','aligned_bp','n_aln_blocks',
+                'pct_id','strand','tgt_cov_bp','n_tgt_genes','n_miniprot','n_rbh',
+                'region_group','group_size','is_primary_in_group','group_best_scaffold',
+                'consensus_src_chrom','n_chrom_rbh','n_chrom_miniprot','frac_on_qtl_chrom',
+                'homoeolog_call','tgt_start','tgt_end','tgt_span'];
+  const lines = [['qtl_id'].concat(cols).join(',')];
+  for (const r of regs)
+    lines.push([DATA.qtl_id].concat(cols.map(c => {
+      const v = r[c];
+      return typeof v === 'string' ? '"' + v.replace(/"/g,'""') + '"' : v;
+    })).join(','));
+  const b = new Blob([lines.join('\\n')], {type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(b);
+  a.download = DATA.qtl_id.replace(/[^A-Za-z0-9._-]/g,'_') + '_regions.csv';
   a.click();
 }
 
@@ -985,6 +1092,8 @@ document.getElementById('selScale').onchange = e => { state.scale = e.target.val
 document.getElementById('selWhich').onchange = e => { state.which = e.target.value; drawHeat(); };
 document.getElementById('cbLinkedOnly').onchange = e => { state.linkedOnly = e.target.checked; drawHeat(); };
 document.getElementById('cbTranspose').onchange = e => { state.transpose = e.target.checked; drawHeat(); };
+document.getElementById('btnSynSvg').onclick = downloadSyntenySvg;
+document.getElementById('btnSynCsv').onclick = downloadRegionsCsv;
 document.querySelectorAll('.btnClearSel').forEach(b => b.onclick = clearSelection);
 document.querySelectorAll('.btnDisplaySel').forEach(b => b.onclick = toggleDisplaySelected);
 document.getElementById('btnClearLane').onclick = () => { SEL_LANE = null; redraw(); };
@@ -1060,6 +1169,9 @@ def main():
                          "columns after, with a header row")
     ap.add_argument("--target-annotation")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--match-report",
+                    help="write the gene/expression/annotation match "
+                         "diagnostics to this file as well as stderr")
     ap.add_argument("--flank", type=int, default=0)
     ap.add_argument("--region-display-mode", choices=["evidence", "gene_length", "all"],
                     default="evidence",
@@ -1195,6 +1307,14 @@ def main():
                 .replace("__DATA__", json.dumps(data, separators=(",", ":"))))
     with open(args.out, "w") as fh:
         fh.write(html)
+    if args.match_report:
+        with open(args.match_report, "w") as rf:
+            rf.write(f"# gene matching report for QTL: {args.qtl_id}\n")
+            rf.write(f"# {args.qtl_chrom}:{args.qtl_start}-{args.qtl_end}\n")
+            rf.write(f"# genes in view: {len(src_genes)} source, "
+                     f"{len(tgt_genes)} target\n#\n")
+            rf.write("\n".join(MATCH_LOG) + "\n")
+
     sys.stderr.write(f"[build_synteny_html] {args.out} ({len(src_genes)} src, "
                      f"{len(tgt_genes)} tgt genes, {len(reg_out)}/{len(all_regions)} "
                      f"scaffolds shown, {n_mp} miniprot, {n_rb} rbh, "
