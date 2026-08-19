@@ -35,7 +35,7 @@ def read_regions(path, qtl_id, drop_homoeologs=False):
             regs.append(dict(
                 seqid=f[i["tgt_seqid"]], rank=int(f[i["rank"]]),
                 start=int(f[i["tgt_start"]]), end=int(f[i["tgt_end"]]),
-                src_cov_pct=f[i["src_cov_pct"]] if "src_cov_pct" in i else "NA",
+                src_cov_pct=f[i["qtl_cov_pct"]] if "qtl_cov_pct" in i else "NA",
                 pct_id=f[i["pct_id"]] if "pct_id" in i else "NA",
                 n_tgt_genes=int(f[i["n_tgt_genes"]]) if "n_tgt_genes" in i else 0,
                 region_group=f[i["region_group"]] if "region_group" in i else "NA",

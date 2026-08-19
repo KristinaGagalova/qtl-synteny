@@ -627,7 +627,8 @@ function drawSynteny(){
     s += `<g class="laneLabel" data-lane="${r.rank}" opacity="${lop}" style="cursor:pointer">
       <rect x="4" y="${lane.y-14}" width="140" height="70" fill="transparent"></rect>
       <text x="8" y="${lane.y+2}" class="axis" font-weight="${active?700:400}">${esc(r.tgt_seqid)} &#128269;</text>
-      <text x="8" y="${lane.y+16}" class="axis" font-weight="600">covers ${r.src_cov_pct.toFixed(1)}% of QTL</text>
+      <text x="8" y="${lane.y+16}" class="axis" font-weight="600">covers ${r.qtl_cov_pct.toFixed(1)}% of QTL</text>
+      <text x="8" y="${lane.y+64+(r.homoeolog_call && (r.homoeolog_call.startsWith('HOMOEOLOG')||r.homoeolog_call.includes('CONFLICT'))?12:0)}" class="axis" opacity=".7">flank: L ${r.left_flank_cov_pct.toFixed(0)}% / R ${r.right_flank_cov_pct.toFixed(0)}%</text>
       <text x="8" y="${lane.y+28}" class="axis">${r.pct_id.toFixed(0)}% id &middot; ${(r.aligned_bp/1000).toFixed(0)}kb aligned</text>
       <text x="8" y="${lane.y+40}" class="axis">${r.n_tgt_genes} genes &middot; ${r.n_miniprot} mp &middot; ${r.n_rbh} rbh</text>
       ${r.group_size > 1 ? `<text x="8" y="${lane.y+52}" class="axis" fill="${r.is_primary_in_group ? '#1a7a4c' : '#8a6d1a'}" font-weight="700"
@@ -999,7 +1000,7 @@ function downloadAnnotationCsv(){
 function drawRegions(){
   const t = document.getElementById('regTbl');
   if (!DATA.regions.length){ t.innerHTML = '<tbody><tr><td class="empty">none</td></tr></tbody>'; return; }
-  const cols = ['rank','tgt_seqid','src_cov_bp','src_cov_pct','aligned_bp','n_aln_blocks','pct_id','strand','tgt_cov_bp','n_tgt_genes','n_miniprot','n_rbh','region_group','group_size','is_primary_in_group','group_best_scaffold','consensus_src_chrom','n_chrom_rbh','n_chrom_miniprot','frac_on_qtl_chrom','homoeolog_call','tgt_start','tgt_end','tgt_span'];
+  const cols = ['rank','tgt_seqid','qtl_cov_bp','qtl_cov_pct','left_flank_cov_pct','right_flank_cov_pct','aligned_bp','n_aln_blocks','pct_id','strand','tgt_cov_bp','n_tgt_genes','n_miniprot','n_rbh','region_group','group_size','is_primary_in_group','group_best_scaffold','consensus_src_chrom','n_chrom_rbh','n_chrom_miniprot','frac_on_qtl_chrom','homoeolog_call','tgt_start','tgt_end','tgt_span'];
   let h = '<thead><tr>' + cols.map(c=>`<th>${c}</th>`).join('') + '</tr></thead><tbody>';
   for (const r of DATA.regions){
     const active = SEL_LANE === r.rank;
@@ -1057,7 +1058,7 @@ function downloadRegionsCsv(){
   const regs = filtering
     ? DATA.regions.filter(r => DATA.target_genes.some(g => g.seqid === r.tgt_seqid && rel.has(g.gene_id)))
     : DATA.regions;
-  const cols = ['rank','tgt_seqid','src_cov_bp','src_cov_pct','aligned_bp','n_aln_blocks',
+  const cols = ['rank','tgt_seqid','qtl_cov_bp','qtl_cov_pct','left_flank_cov_pct','right_flank_cov_pct','aligned_bp','n_aln_blocks',
                 'pct_id','strand','tgt_cov_bp','n_tgt_genes','n_miniprot','n_rbh',
                 'region_group','group_size','is_primary_in_group','group_best_scaffold',
                 'consensus_src_chrom','n_chrom_rbh','n_chrom_miniprot','frac_on_qtl_chrom',
@@ -1195,8 +1196,10 @@ def main():
             rank=int(r["rank"]), tgt_seqid=r["tgt_seqid"],
             aligned_bp=int(r["aligned_bp"]), n_aln_blocks=int(r["n_aln_blocks"]),
             pct_id=float(r["pct_id"]), strand=r["strand"],
-            src_cov_bp=int(r.get("src_cov_bp", 0) or 0),
-            src_cov_pct=float(r.get("src_cov_pct", 0) or 0),
+            qtl_cov_bp=int(r.get("qtl_cov_bp", 0) or 0),
+            qtl_cov_pct=float(r.get("qtl_cov_pct", 0) or 0),
+            left_flank_cov_pct=float(r.get("left_flank_cov_pct", 0) or 0),
+            right_flank_cov_pct=float(r.get("right_flank_cov_pct", 0) or 0),
             homoeolog_call=r.get("homoeolog_call", "NA"),
             consensus_src_chrom=r.get("consensus_src_chrom", "NA"),
             frac_on_qtl_chrom=float(r.get("frac_on_qtl_chrom", 0) or 0),
@@ -1272,7 +1275,7 @@ def main():
         without_genes_pct=float(cov_row["cov_without_genes_pct"]) if cov_row else 0.0,
         total_bp=int(cov_row["cov_total_bp"]) if cov_row else 0,
         total_pct=float(cov_row["cov_total_pct"]) if cov_row else 0.0,
-        slice_len=int(cov_row["src_slice_len"]) if cov_row else 0)
+        slice_len=int(cov_row["qtl_len"]) if cov_row else 0)
 
     data = dict(
         qtl_id=args.qtl_id,

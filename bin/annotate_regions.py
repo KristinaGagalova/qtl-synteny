@@ -59,10 +59,27 @@ def merge_len(intervals):
     return sum(e - s for s, e in merged), merged
 
 
-def read_paf_src_intervals(path):
-    """target_seqid -> list of (query_start, query_end) blocks, from the same
-    PAF rank_dna_regions.py used - needed here to compute the two-way source
-    coverage split (scaffolds WITH vs WITHOUT protein evidence)."""
+def _unoffset(name):
+    """Same convention as rank_dna_regions.py / build_synteny_html.py:
+    `seqid:start-end` (1-based) -> (seqid, offset)."""
+    if ":" in name and "-" in name.rsplit(":", 1)[-1]:
+        base, span = name.rsplit(":", 1)
+        try:
+            return base, int(span.split("-")[0]) - 1
+        except ValueError:
+            pass
+    return name, 0
+
+
+def read_paf_src_intervals(path, qtl_start, qtl_end):
+    """target_seqid -> list of QTL-CLIPPED (query_start, query_end) blocks,
+    in real source-genome coordinates.
+
+    Needed here to compute the two-way source coverage split (scaffolds
+    WITH vs WITHOUT protein evidence). This clips to the QTL exactly like
+    rank_dna_regions.py does, for the same reason: the alignment query
+    includes source_flank padding, and a scaffold that only aligns to the
+    flank must not count towards "coverage of the QTL"."""
     by_t = defaultdict(list)
     if not path:
         return by_t
@@ -72,7 +89,11 @@ def read_paf_src_intervals(path):
             if len(f) < 12:
                 continue
             try:
-                by_t[f[5]].append((int(f[2]), int(f[3])))
+                qseq, qoff = _unoffset(f[0])
+                s, e = qoff + int(f[2]), qoff + int(f[3])
+                cs, ce = max(s, qtl_start), min(e, qtl_end)
+                if ce > cs:
+                    by_t[f[5]].append((cs, ce))
             except ValueError:
                 continue
     return by_t
@@ -144,15 +165,20 @@ def read_regions(path, qtl_id):
                 aligned_bp=int(f[i["aligned_bp"]]),
                 n_aln_blocks=int(f[i["n_aln_blocks"]]),
                 pct_id=float(f[i["pct_id"]]), strand=f[i["strand"]],
-                src_slice_len=int(g("src_slice_len")),
-                src_cov_bp=int(g("src_cov_bp")),
-                src_cov_pct=float(g("src_cov_pct")),
+                qtl_len=int(g("qtl_len")),
+                qtl_cov_bp=int(g("qtl_cov_bp")),
+                qtl_cov_pct=float(g("qtl_cov_pct")),
+                left_flank_cov_bp=int(g("left_flank_cov_bp")),
+                left_flank_cov_pct=float(g("left_flank_cov_pct")),
+                right_flank_cov_bp=int(g("right_flank_cov_bp")),
+                right_flank_cov_pct=float(g("right_flank_cov_pct")),
+                full_query_cov_bp=int(g("full_query_cov_bp")),
                 tgt_cov_bp=int(g("tgt_cov_bp")),
                 region_group=int(g("region_group", "0")),
                 group_size=int(g("group_size", "1")),
                 provisional_group_best=int(g("provisional_group_best", "1")),
-                union_src_cov_bp=int(g("union_src_cov_bp")),
-                union_src_cov_pct=float(g("union_src_cov_pct")),
+                union_qtl_cov_bp=int(g("union_qtl_cov_bp")),
+                union_qtl_cov_pct=float(g("union_qtl_cov_pct")),
                 raw=f, hdr=hdr))
     regs.sort(key=lambda r: r["rank"])
     return regs
@@ -345,10 +371,15 @@ def main():
         mp_by_seq[h["seqid"]].append((h["start"], h["end"], srec[0]))
 
     def chrom_tally(seqid, region):
-        """(rbh Counter, miniprot Counter) of source chromosomes for one region."""
+        """(rbh Counter, miniprot Counter) of source chromosomes for one
+        region -- scoped to THIS region row specifically (by rank), not to
+        every gene that happens to share the scaffold name. Once a scaffold
+        can produce more than one region (see rank_dna_regions.py's target-
+        side clustering), a gene belonging to a distant, unrelated cluster
+        on the same scaffold must not contribute to this region's tally."""
         c_rbh = Counter()
-        for (sq, _s, _e, gid, _st, _tid, _rk) in tgt_genes:
-            if sq != seqid:
+        for (sq, _s, _e, gid, _st, _tid, rk) in tgt_genes:
+            if rk != region["rank"]:
                 continue
             c = tgt_gene_src_chrom.get(gid)
             if c:
@@ -383,43 +414,6 @@ def main():
                 call += ";EVIDENCE_CONFLICT"
         return (top, total, n_rbh, n_mp, frac, call)
 
-    links = []
-    per_region = defaultdict(lambda: {"miniprot": 0, "rbh": 0})
-
-    # ---- STEP 3: miniprot placements of the QTL's source proteins
-    mp_all = parse_miniprot(args.miniprot)
-    mp_all_unfiltered = mp_all
-    mp_seen = len(mp_all)
-    mp_example = mp_all[0]["protein"] if mp_all else None
-    mp = [h for h in mp_all if norm_id(h["protein"]) in qtl_prot_ids]
-    n_mp_total = len(mp)
-    for h in mp:
-        if h["ident"] < args.miniprot_min_ident:
-            continue
-        r = in_regions(regs, h["seqid"], h["start"], h["end"])
-        if r is None:
-            continue
-        srec = src_by_id.get(h["protein"]) or src_by_id.get(norm_id(h["protein"]))
-        if srec is None:
-            continue
-        sseq, ss, se, sstrand, sgid = srec
-        # is there an annotated target gene at this placement?
-        overlapping = [g for g in tgt_by_seq.get(h["seqid"], [])
-                       if g[0] < h["end"] and g[1] > h["start"]]
-        tgene = overlapping[0][2] if overlapping else ""
-        links.append(dict(track="miniprot", src_gene=sgid, src_start=ss, src_end=se,
-                          src_strand=sstrand, tgt_gene=tgene, tgt_seqid=h["seqid"],
-                          tgt_start=h["start"], tgt_end=h["end"],
-                          tgt_strand=h["strand"], pident=100.0 * h["ident"],
-                          bits=0, rank=r["rank"]))
-        per_region[r["tgt_seqid"]]["miniprot"] += 1
-
-    # ---- STEP 4: reciprocal best hits between the two annotations
-    rbh = read_m8(args.rbh)
-    n_rbh_total = sum(len(v) for v in rbh.values())
-    rbh_example = next(iter(rbh), None)
-    rbh_resolved = sum(1 for q in rbh
-                       if src_by_id.get(q) or src_by_id.get(norm_id(q)))
 
     for q, lst in rbh.items():
         srec = src_by_id.get(q) or src_by_id.get(norm_id(q))
@@ -479,7 +473,7 @@ def main():
     for g, members in by_group.items():
         members.sort(key=lambda r: (-evidence_count(r["tgt_seqid"]),
                                     -r["provisional_group_best"],
-                                    -r["src_cov_bp"]))
+                                    -r["qtl_cov_bp"]))
         for k, r in enumerate(members):
             is_primary[r["tgt_seqid"]] = (k == 0)
 
@@ -487,7 +481,7 @@ def main():
     # Union coverage from ALL DNA hits (not just kept/displayed regions),
     # split into scaffolds that carry >=1 RBH or miniprot link vs those that
     # do not. Independent of what --top-n or the viewer ends up showing.
-    paf_iv = read_paf_src_intervals(args.paf)
+    paf_iv = read_paf_src_intervals(args.paf, args.qtl_start, args.qtl_end)
     with_gene_iv, without_gene_iv = [], []
     for seqid, blocks in paf_iv.items():
         bucket = with_gene_iv if evidence_count(seqid) > 0 else without_gene_iv
@@ -495,22 +489,25 @@ def main():
     cov_with_bp, _ = merge_len(with_gene_iv)
     cov_without_bp, _ = merge_len(without_gene_iv)
     cov_total_bp, _ = merge_len(with_gene_iv + without_gene_iv)
-    slice_len = regs[0]["src_slice_len"] if regs else 0
-    pct = lambda bp: 100.0 * bp / slice_len if slice_len else 0.0
+    qtl_len = (args.qtl_end - args.qtl_start) or 1
+    pct = lambda bp: 100.0 * bp / qtl_len
 
     with open(args.out_coverage, "w") as cov:
-        cov.write("qtl_id\tsrc_slice_len\tcov_with_genes_bp\tcov_with_genes_pct\t"
+        cov.write("qtl_id\tqtl_len\tcov_with_genes_bp\tcov_with_genes_pct\t"
                   "cov_without_genes_bp\tcov_without_genes_pct\t"
                   "cov_total_bp\tcov_total_pct\n")
-        cov.write(f"{args.qtl_id}\t{slice_len}\t{cov_with_bp}\t{pct(cov_with_bp):.2f}\t"
+        cov.write(f"{args.qtl_id}\t{qtl_len}\t{cov_with_bp}\t{pct(cov_with_bp):.2f}\t"
                   f"{cov_without_bp}\t{pct(cov_without_bp):.2f}\t"
                   f"{cov_total_bp}\t{pct(cov_total_bp):.2f}\n")
 
     with open(args.out_regions, "w") as out:
-        out.write("qtl_id\tsrc_chrom\tsrc_start\tsrc_end\tsrc_slice_len\trank\t"
+        out.write("qtl_id\tsrc_chrom\tsrc_start\tsrc_end\tqtl_len\trank\t"
                   "tgt_seqid\taligned_bp\tn_aln_blocks\tpct_id\tstrand\t"
-                  "src_cov_bp\tsrc_cov_pct\t"
-                  "tgt_cov_bp\tunion_src_cov_bp\tunion_src_cov_pct\t"
+                  "qtl_cov_bp\tqtl_cov_pct\t"
+                  "left_flank_cov_bp\tleft_flank_cov_pct\t"
+                  "right_flank_cov_bp\tright_flank_cov_pct\t"
+                  "full_query_cov_bp\t"
+                  "tgt_cov_bp\tunion_qtl_cov_bp\tunion_qtl_cov_pct\t"
                   "tgt_start\ttgt_end\ttgt_span\tn_tgt_genes\tn_miniprot\tn_rbh\t"
                   "region_group\tgroup_size\tis_primary_in_group\tgroup_best_scaffold\t"
                   "consensus_src_chrom\tn_chrom_assigned\tn_chrom_rbh\tn_chrom_miniprot\t"
@@ -524,11 +521,14 @@ def main():
             grp_members = by_group[r["region_group"]]
             grp_best = next(m["tgt_seqid"] for m in grp_members if is_primary[m["tgt_seqid"]])
             out.write(f"{args.qtl_id}\t{args.qtl_chrom}\t{args.qtl_start}\t{args.qtl_end}\t"
-                      f"{r['src_slice_len']}\t{r['rank']}\t{r['tgt_seqid']}\t"
+                      f"{r['qtl_len']}\t{r['rank']}\t{r['tgt_seqid']}\t"
                       f"{r['aligned_bp']}\t{r['n_aln_blocks']}\t{r['pct_id']:.1f}\t"
-                      f"{r['strand']}\t{r['src_cov_bp']}\t{r['src_cov_pct']:.2f}\t"
-                      f"{r['tgt_cov_bp']}\t{r['union_src_cov_bp']}\t"
-                      f"{r['union_src_cov_pct']:.2f}\t"
+                      f"{r['strand']}\t{r['qtl_cov_bp']}\t{r['qtl_cov_pct']:.2f}\t"
+                      f"{r['left_flank_cov_bp']}\t{r['left_flank_cov_pct']:.2f}\t"
+                      f"{r['right_flank_cov_bp']}\t{r['right_flank_cov_pct']:.2f}\t"
+                      f"{r['full_query_cov_bp']}\t"
+                      f"{r['tgt_cov_bp']}\t{r['union_qtl_cov_bp']}\t"
+                      f"{r['union_qtl_cov_pct']:.2f}\t"
                       f"{r['tgt_start']}\t{r['tgt_end']}\t{r['tgt_end']-r['tgt_start']}\t"
                       f"{ng}\t{c['miniprot']}\t{c['rbh']}\t"
                       f"{r['region_group']}\t{r['group_size']}\t"

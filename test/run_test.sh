@@ -6,6 +6,12 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$HERE")"
 NF="${NEXTFLOW:-nextflow}"
 
+# coordinate-logic regression tests first - these assert exact coverage
+# numbers and region boundaries, which the integration test below cannot
+echo "=== coordinate-logic regression tests ==="
+python3 "$HERE/test_coverage_logic.py"
+echo
+
 python3 "$HERE/make_test_data.py" "$HERE/data"
 export PATH="$HERE/shims:$PATH"
 

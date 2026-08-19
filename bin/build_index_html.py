@@ -58,8 +58,8 @@ def main():
         if rs_gene:
             top = rs_gene[0]
             tgt  = html.escape(top["tgt_seqid"])
-            cov  = f'{float(top.get("union_src_cov_pct", 0) or 0):.1f}%'
-            tcov = f'{float(top.get("src_cov_pct", 0) or 0):.1f}%'
+            cov  = f'{float(top.get("union_qtl_cov_pct", 0) or 0):.1f}%'
+            tcov = f'{float(top.get("qtl_cov_pct", 0) or 0):.1f}%'
             pid  = f'{float(top.get("pct_id", 0)):.1f}%'
             ngen = top.get("n_tgt_genes", "0")
             nmp  = top.get("n_miniprot", "0")
